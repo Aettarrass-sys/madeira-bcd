@@ -1,4 +1,4 @@
-name: Build Madeira IPA (unsigned)
+name: Build Madeira IPA (ad hoc signed)
 
 on:
   workflow_dispatch:
@@ -1214,17 +1214,46 @@ jobs:
             echo "::notice::all six macdrv symbols are exported"
           fi
 
-      - name: Package unsigned IPA
+      - name: Sign app with requested entitlements and package IPA
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p build-out/Payload
           cp -R build-out/Madeira.xcarchive/Products/Applications/Madeira.app build-out/Payload/
-          cd build-out && ditto -c -k --keepParent Payload Madeira-0.1.${{ github.run_number }}-unsigned.ipa
+          app=build-out/Payload/Madeira.app
+          bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
+          test "$bundle_id" = com.willfaust.mythicemu
+          # Sign nested Mach-O code first, then seal the enclosing app with
+          # the entitlements SideStore should receive as its signing input.
+          if [ -f "$app/Madeira.debug.dylib" ]; then
+            codesign --force --sign - --timestamp=none "$app/Madeira.debug.dylib"
+            codesign --verify --strict --verbose=2 "$app/Madeira.debug.dylib"
+          fi
+          converter="$app/d3d12/libmetalirconverter.dylib"
+          test -s "$converter"
+          codesign --force --sign - --timestamp=none "$converter"
+          codesign --verify --strict --verbose=2 "$converter"
+          codesign --force --sign - --timestamp=none \
+            --entitlements app/Madeira/Madeira.entitlements "$app"
+          codesign --verify --strict --verbose=2 "$app"
+          codesign -d --entitlements :- "$app" > build-out/signed-entitlements.plist 2>/dev/null
+          for entitlement in \
+            com.apple.developer.kernel.extended-virtual-addressing \
+            com.apple.developer.kernel.increased-memory-limit \
+            com.apple.developer.kernel.increased-debugging-memory-limit \
+            get-task-allow; do
+            value=$(/usr/libexec/PlistBuddy -c "Print :$entitlement" build-out/signed-entitlements.plist)
+            test "$value" = true || { echo "::error::$entitlement missing from app signature"; exit 1; }
+            echo "Verified signed entitlement: $entitlement=true"
+          done
+          cd build-out
+          ditto -c -k --keepParent Payload Madeira-0.1.${{ github.run_number }}-adhoc.ipa
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: madeira-0.1.${{ github.run_number }}-unsigned-ipa
-          path: build-out/Madeira-0.1.${{ github.run_number }}-unsigned.ipa
+          name: madeira-0.1.${{ github.run_number }}-adhoc-ipa
+          path: build-out/Madeira-0.1.${{ github.run_number }}-adhoc.ipa
           if-no-files-found: ignore
 
       # Full logs as an artifact -- the annotations above are truncated, and
