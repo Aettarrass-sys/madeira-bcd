@@ -181,6 +181,30 @@ crashes, add a watch: `vmwatch` in madeira.cfg cannot help (addresses differ
 per run); instead log the guest call stack of the thread that frees a
 0x110000 view (NtFreeVirtualMemory caller RIP) and of the reader.
 
+### Build 185 attempted test (2026-09-27 18:21, log `GhostOfTsushima.exe-2026-09-27_18-21-33.txt`)
+The game crashed again, but **this was not a fastsync-off test**: at log line
+269 Wine says `[fastsync] ... mode=auto`, at line 15147 it says `AUTO-ENABLED`,
+and subsequent `[perf]` lines count tens of thousands of fastsync hits. No
+`[madeira-env]` line sets `MADEIRA_FASTSYNC`. The owner subsequently confirmed
+that the per-game switch had not been enabled for this run.
+`LaunchRequest.apply()` in `app/Madeira/HomeView.swift` does set the variable
+to `0` when its saved
+`safeSync` preference is true; the game's launched exe was the expected x64
+`GhostOfTsushima.exe`, with AVX and NVIDIA reporting enabled. Re-check the
+game's **Launch options > Safe thread sync (no fastsync)**, use **Save and play**
+and confirm the next log says `[fastsync] ... mode=off` (the exact mode string
+should be checked against the log). A fallback is `env.MADEIRA_FASTSYNC = 0`
+in `Documents/madeira.cfg` for the experiment. Do not treat this run as
+evidence for or against the fastsync hypothesis.
+
+The original failure reproduced: a worker (tid `00f0`) deleted the
+`0x706ed30000+0x110000` view **2 ms** before tid `00f8` read from
+`0x706ed3c000` during a 1 MB copy (`c0000005`; `[fault-rgn]` lines
+36299-36316). No new GPU timeout was logged. The process later ran the game
+crash handler; its own faults are secondary. Next action is a true fastsync-off
+run. If the same freed-while-read signature remains with `mode=off`, collect
+the freeing and reading guest call stacks as proposed above.
+
 **About the Metal HUD suggestion "adopt MTL4Compiler"**: Metal 4
 (iOS/macOS 26+) has `MTL4Compiler` (explicit compiler objects, async
 compilation with QoS, `MTL4Archive`, flexible render pipeline states that
