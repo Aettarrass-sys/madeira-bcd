@@ -262,6 +262,18 @@ Workflow **#186**, run **36331180977**:
 Initial status `in_progress`; await result and artifact before declaring an IPA
 ready or advancing `main`.
 
+**Build 186 result (2026-09-27 19:09 UTC+3): SUCCESS.** Run
+`36331180977` completed successfully from commit `0c925759`; the `Archive
+(unsigned)`, `Package unsigned IPA`, and artifact upload steps all passed.
+Artifact **`madeira-0.1.186-unsigned-ipa`**, id `10935873381`, about 141 MB;
+download it from the run page above while signed in to GitHub. This validates
+compilation and packaging, **not** the on-device crash. The next device test
+should retain AVX/NVIDIA settings and `Safe thread sync (no fastsync)` ON so
+the new `[free-origin]` records can be compared with the build 185 mode-off
+log. If it crashes, upload the complete session log. Compare the freed view,
+release-site candidates and reader `[callret]` frames; do not infer an exact
+caller from the stack scan alone.
+
 **About the Metal HUD suggestion "adopt MTL4Compiler"**: Metal 4
 (iOS/macOS 26+) has `MTL4Compiler` (explicit compiler objects, async
 compilation with QoS, `MTL4Archive`, flexible render pipeline states that
