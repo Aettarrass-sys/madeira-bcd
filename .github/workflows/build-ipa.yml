@@ -768,6 +768,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set +e
           set -o pipefail
           API="https://api.github.com/repos/$GITHUB_REPOSITORY/releases?per_page=100"
           ASSET=$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 \
@@ -805,16 +806,18 @@ jobs:
             *) PKG="/tmp/msc/$NAME" ;;
           esac
           if [ -z "$PKG" ]; then
-            echo "::error::no .pkg inside $NAME"; hdiutil detach /tmp/msc/mnt > /dev/null 2>&1; exit 0
+            echo "::error::no .pkg inside $NAME"; exit 1
           fi
-          pkgutil --expand-full "$PKG" /tmp/msc/x > /dev/null
-          hdiutil detach /tmp/msc/mnt > /dev/null 2>&1
+          pkgutil --expand-full "$PKG" /tmp/msc/x > /dev/null || {
+            echo "::error::could not expand Metal Shader Converter package"; exit 1;
+          }
+          case "$NAME" in *.dmg|*.DMG) hdiutil detach /tmp/msc/mnt > /dev/null ;; esac
           HDR=$(find /tmp/msc/x -path "*include/metal_irconverter/metal_irconverter.h" | head -1)
           LIB=$(find /tmp/msc/x -path "*lib_iOS/libmetalirconverter.dylib" | head -1)
           if [ -z "$HDR" ] || [ -z "$LIB" ]; then
             echo "::error::package layout not recognised (header: ${HDR:-none}, iOS lib: ${LIB:-none})"
             find /tmp/msc/x -maxdepth 6 -type d | head -30
-            exit 0
+            exit 1
           fi
           INC=$(dirname "$(dirname "$HDR")")
           DEST="$GITHUB_WORKSPACE/build/madeira-d3d12/msc-include"
