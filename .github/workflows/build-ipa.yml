@@ -847,12 +847,6 @@ jobs:
           fi
           exit "$rc"
 
-      - name: Verify iOS 18 deployment target
-        run: |
-          app=build-out/Madeira.xcarchive/Products/Applications/Madeira.app
-          test "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist")" = 18.0
-          xcrun vtool -show-build "$app/Madeira" | grep -Eq 'minos[[:space:]]+18[.]0'
-
       - name: Combine DXMT + LLVM into libdxmt_combined.a
         shell: bash
         run: |
@@ -1148,6 +1142,19 @@ jobs:
               "$GITHUB_WORKSPACE/archive.log" | cut -c1-200 | head -15
           fi
           exit "$rc"
+
+      - name: Verify iOS 18 deployment target
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=build-out/Madeira.xcarchive/Products/Applications/Madeira.app
+          test -f "$app/Info.plist"
+          test -f "$app/Madeira"
+          minimum_os=$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist")
+          echo "Archived app MinimumOSVersion: $minimum_os"
+          test "$minimum_os" = 18.0
+          xcrun vtool -show-build "$app/Madeira" | tee build-out/madeira-build-version.txt
+          grep -Eq 'minos[[:space:]]+18[.]0' build-out/madeira-build-version.txt
 
       # A device run reached DXMT and died there:
       #   err: Failed to create metal view, it seems like your Wine has no
