@@ -34,6 +34,11 @@ Upstream PRs merged into the fork (not yet merged upstream):
 * **Reply in Turkish.** Owner's clock is UTC+3.
 * Work autonomously: diagnose from the log, fix, build, hand over an IPA link.
   The owner dislikes being asked things the agent can decide itself.
+* The owner explicitly authorized **automatically starting this workflow after
+  every crash/error report** (2026-09-27). Do not stop after pushing a fix;
+  dispatch the development-branch workflow, inspect its result, and hand over
+  the IPA run/artifact link. Keep this handoff append-only in substance so
+  Claude and Codex can alternate without losing earlier findings.
 * Develop on branch **`claude/madeira-bcd-repo-ymg5cb`**, push there.
 * Build: dispatch `.github/workflows/build-ipa.yml` on that branch
   (workflow_dispatch). When it is green, fast-forward `main`
@@ -233,6 +238,8 @@ not a verified unwind; compare them with the reader's existing `[callret]`
 trace. The data prints only when a later fault overlaps the freed view.
 Build and test this instrumented revision next; then identify the releasing
 call site before changing scheduling or memory-lifetime semantics.
+The diagnostic code and these notes were pushed together as commit
+`6d758e544cffeff98ad8a7720b96690ec053cdc7` on the development branch.
 
 **About the Metal HUD suggestion "adopt MTL4Compiler"**: Metal 4
 (iOS/macOS 26+) has `MTL4Compiler` (explicit compiler objects, async
