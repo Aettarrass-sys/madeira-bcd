@@ -183,6 +183,14 @@ already did.
   first gameplay frames, Metal then ignored the queue and the game stopped
   itself, and the error named no shader. `gpu-fault-info = 0` /
   `gpu-fault-skip = 0` in madeira.cfg turn it off / keep such pipelines.
+- 64-bit allocations above the 32-bit windows (`build/ntdll-unix/virtual_ios.c`,
+  `ios_wow_high_side`): with PR #28's slot-0 placeholder at 0x7100000000,
+  window exclusion kept only the band below it, so a 64-bit program's clamped
+  allocations had 0x7038000000..0x7100000000 (3.2 GB) and never the ~8 GB
+  above. A request with a caller-set lower bound cannot relax to a kernel pick,
+  so once that band filled it got STATUS_NO_MEMORY (Ghost of Tsushima: 1 MB,
+  then the game stopped itself). The band above the windows is now tried
+  before relaxing or failing (`[wow-window] ... placed above them`).
 - View history and stack quarantine (`build/ntdll-unix/virtual_ios.c`,
   `ios_vh_*`, `ios_stack_release`): Ghost of Tsushima's worker threads faulted
   copying 2 MB from a range that had been an exited thread's native stack and

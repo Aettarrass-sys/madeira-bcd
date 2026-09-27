@@ -9200,6 +9200,34 @@ static void ios_wow_exclude_range( void **start, void **end, ULONG_PTR wb, ULONG
        the range alone and let the caller's own fallback decide */
 }
 
+/* madeira-bcd: the part of [start, end) above every window and placeholder
+ * that overlaps it (the side ios_wow_exclude_range drops). */
+static void ios_wow_high_side( void *start, void *end, void **hs, void **he )
+{
+    ULONG_PTR lo = (ULONG_PTR)start, hi = (ULONG_PTR)end, moved;
+    unsigned i;
+
+    do
+    {
+        moved = 0;
+        for (i = 0; i < ios_wow_window_count; i++)
+        {
+            ULONG_PTR wb = ios_wow_windows[i].base, we;
+            if (!wb) continue;
+            we = wb + ios_wow_slot_reservation( &ios_wow_windows[i] );
+            if (wb < hi && we > lo) { lo = we; moved = 1; }
+        }
+        for (i = 0; i < ios_wow_placeholder_count; i++)
+        {
+            ULONG_PTR pb = ios_wow_placeholders[i].base, pe;
+            if (!pb || ios_wow_placeholders[i].adopted) continue;
+            pe = pb + IOS_WOW_WINDOW_SIZE + (ios_wow_placeholders[i].guard_owned ? ios_wow_guard_size() : 0);
+            if (pb < hi && pe > lo) { lo = pe; moved = 1; }
+        }
+    } while (moved && lo < hi);
+    if (lo < hi) { *hs = (void *)lo; *he = (void *)hi; }
+}
+
 static void ios_wow_exclude_windows( void **start, void **end )
 {
     unsigned i, n = ios_wow_window_count;
@@ -16079,6 +16107,7 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
          * top-of-space tenant from ml106) stay below 464G-64K; only the PA
          * 16GB/32GB pool reserves may use the slots above. */
         int ceiling_relaxable = 0;
+        void *wow_hi_start = NULL, *wow_hi_end = NULL;   /* madeira-bcd: band above the 32-bit windows */
         if (ios_furniture_ceiling && !limit_high && size < 0x400000000ULL &&
             (void *)ios_furniture_ceiling < end)
         {
@@ -16118,7 +16147,15 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
             /* the bias is advisory: if excluding the windows would leave no
              * room at all, keep the original range rather than fail — the
              * same rule the furniture ceiling follows (ml117). */
-            if (excl_start < excl_end) { start = excl_start; end = excl_end; }
+            if (excl_start < excl_end)
+            {
+                /* madeira-bcd: exclusion keeps the LOW side of a window, so a
+                 * 64-bit program was confined below the first slot's placeholder
+                 * (0x7038000000..0x7100000000, 3.2 GB) and never used the band
+                 * above it. Remember that high side for when the low one is full. */
+                if (excl_end < end) ios_wow_high_side( excl_end, end, &wow_hi_start, &wow_hi_end );
+                start = excl_start; end = excl_end;
+            }
         }
 
         /* Keep the one remaining 4 GB-ALIGNED slot free for a future 32-bit
@@ -16313,6 +16350,22 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
             {
                 TRACE( "got mem with map_free_area %p-%p\n", ptr, (char *)ptr + size );
                 goto done;
+            }
+            /* madeira-bcd: the band below the 32-bit windows is full; use the
+             * one above them before relaxing or failing (Ghost of Tsushima got
+             * STATUS_NO_MEMORY for 1 MB with ~8 GB free above the placeholder
+             * and stopped itself). */
+            if (wow_hi_start && (size_t)((char *)wow_hi_end - (char *)wow_hi_start) >= view_size)
+            {
+                static unsigned long hi_n;
+
+                ptr = map_reserved_area( wow_hi_start, wow_hi_end, host_size, top_down, unix_prot, align_mask );
+                if (!ptr) ptr = map_free_area( wow_hi_start, wow_hi_end, host_size, top_down, unix_prot, align_mask );
+                if (++hi_n <= 16 || !(hi_n % 256))
+                    dprintf( 2, "[wow-window] #%lu band below the 32-bit windows full: 0x%lx bytes %s above them in %p..%p%s\n",
+                             hi_n, (unsigned long)size, ptr ? "placed" : "NOT placed", wow_hi_start, wow_hi_end,
+                             ptr ? "" : " (falling back as before)" );
+                if (ptr) goto done;
             }
             /* ml117: THE CEILING IS ADVISORY, NEVER FATAL. It exists only to
              * bias Wine's furniture low so the top 16GB-aligned slots stay free
