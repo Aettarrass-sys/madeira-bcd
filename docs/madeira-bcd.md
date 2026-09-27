@@ -171,6 +171,26 @@ already did.
   stopped itself after a failed allocation at 7.9 GB. A tessellation pipeline
   the runtime cannot build is now a placeholder (draws skipped) rather than
   E_FAIL, as ml1138 already did for geometry shaders.
+- GPU fault attribution (`mad_fault_*`, `tools/patch-dxmt-gpu-fault-info.py`):
+  batch command buffers are created with
+  `MTLCommandBufferErrorOptionEncoderExecutionStatus` (winemetal
+  `madeira_ctl` op 8, patched into `winemetal_unix.c` at build time), and a
+  failed one logs `GPU fault encoders: [FAULTED] <label> ...` (op 9). After the
+  first fault every encoder is labelled, each compute encoder runs one
+  pipeline, and a render pass is labelled with the pipelines it drew with; a
+  pipeline a faulted encoder names alone is skipped from then on
+  (`GPU fault: ... will be skipped`). Ghost of Tsushima hung the GPU in its
+  first gameplay frames, Metal then ignored the queue and the game stopped
+  itself, and the error named no shader. `gpu-fault-info = 0` /
+  `gpu-fault-skip = 0` in madeira.cfg turn it off / keep such pipelines.
+- Texture UAV clears (`mad_record_uav_tex_clear`, `MC_FILL_TEX`):
+  `ClearUnorderedAccessViewUint/Float` on a texture view used to be skipped.
+  The view's mip, slices and format are remembered by view id at
+  `CreateUnorderedAccessView`; the texel is packed in the view format (uint
+  clears copy each channel's low bits, float clears convert: 32/16-bit float,
+  unorm, snorm, int, 10:10:10:2, 11:11:10) and blitted from a pattern buffer in
+  row bands. Formats whose texel is not one repeating 32-bit word (a 64- or
+  128-bit texel with different channels) are still skipped, with a log line.
 - Virtual display adapter in the registry (`build/win32u-unix/sysparams_ios.c`,
   `ios_register_virtual_gpu`): this port never enumerates display devices, so
   the registry had no display adapter at all -- no `Enum\PCI` entry for
