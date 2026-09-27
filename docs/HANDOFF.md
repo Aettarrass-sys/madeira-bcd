@@ -273,6 +273,10 @@ the new `[free-origin]` records can be compared with the build 185 mode-off
 log. If it crashes, upload the complete session log. Compare the freed view,
 release-site candidates and reader `[callret]` frames; do not infer an exact
 caller from the stack scan alone.
+After success, Codex fast-forwarded `main` to the development branch's
+`1ec7af666a0cb4033c9ed51fb67045ea8ce129f8` documentation commit;
+both refs matched. The final handoff update itself is documentation-only and
+should also be fast-forwarded to `main`.
 
 **About the Metal HUD suggestion "adopt MTL4Compiler"**: Metal 4
 (iOS/macOS 26+) has `MTL4Compiler` (explicit compiler objects, async
