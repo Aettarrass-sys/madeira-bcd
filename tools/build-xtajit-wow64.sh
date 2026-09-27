@@ -1,6 +1,6 @@
 #!/bin/bash
-# Rebuild the 32-bit WoW64 CPU module. The tracked xtajit.dll predates the
-# 125hz fix for native TLS access while Wine is entering a WoW64 process.
+# Rebuild the 32-bit WoW64 CPU module. The tracked xtajit.dll has a C++
+# constructor startup bug and also predates 125hz's removal of FEX native TLS.
 set -euo pipefail
 
 ROOT="$(pwd)"
@@ -25,6 +25,7 @@ git -C "$SOURCE" submodule update --init --recursive --depth 1
 # insufficient: a stale committed DLL had the same nominal FEX snapshot.
 grep -q 'std::atomic<uint64_t> IRCapRIP' "$SOURCE/FEXCore/Source/Interface/IR/PassManager.cpp"
 grep -q 'mrs %0, TPIDRRO_EL0' "$SOURCE/FEXCore/Source/Utils/AllocWatch.cpp"
+cp "$ROOT/tools/fex-wow64-crt-ios.cpp" "$SOURCE/Source/Windows/Common/CRT/CRT_iOS.cpp"
 
 cmake -S "$SOURCE" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_TOOLCHAIN_FILE="$SOURCE/Data/CMake/toolchain_mingw.cmake" \
@@ -61,15 +62,18 @@ def inspect(path):
         p = off+40*i
         name = data[p:p+8].rstrip(b'\0').decode()
         sections[name] = struct.unpack_from('<I', data, p+8)[0]
-    return hashlib.sha256(data).hexdigest(), sections
+    return hashlib.sha256(data).hexdigest(), sections, data
 
-old_hash, old_sections = inspect(sys.argv[1])
-new_hash, new_sections = inspect(sys.argv[2])
+old_hash, old_sections, _ = inspect(sys.argv[1])
+new_hash, new_sections, new_data = inspect(sys.argv[2])
 print('tracked xtajit.dll:', old_hash, old_sections)
 print('rebuilt xtajit.dll:', new_hash, new_sections)
 assert old_hash != new_hash, 'the old 32-bit DLL would still be shipped'
 assert '.text' in new_sections and '.pdata' in new_sections
-assert new_sections.get('.tls', 0) == 0, 'native TLS remains in the rebuilt WoW64 module'
+# MinGW's static libc++abi contributes a .tls section even after FEX's own
+# thread_local uses are removed. The exact first-launch crash is a throw from
+# an unconstructed unordered_map; require the constructor repair in the PE.
+assert b'[wow64-crt] ran skipped constructors' in new_data
 PY
 
 # Wine expects this precise name in aarch64-windows; the Xcode folder resource

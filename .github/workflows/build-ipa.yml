@@ -467,16 +467,16 @@ jobs:
           path: toolchains/llvm-mingw-20260421-ucrt-macos-universal
           key: llvm-mingw-20260421-ucrt-macos-universal
 
-      # The tracked 32-bit CPU DLL still contains native Windows TLS. Wine's
-      # WoW64 startup has no TEB TLS array yet, so every x86 program crashes
-      # at libwow64fex.dll+0x1b6ac8 before reaching its own entry point.
+      # Wine enters this CPU DLL before its normal DLL constructor chain has
+      # run. The first insertion into its unconstructed thread map throws;
+      # libc++abi then faults reading native TLS at libwow64fex.dll+0x1b6ac8.
       - name: Require llvm-mingw for the 32-bit CPU module
         shell: bash
         run: |
           test "$MINGW_OK" = 1
           test -x toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin/aarch64-w64-mingw32-clang++
 
-      - name: Rebuild 32-bit xtajit.dll without native TLS
+      - name: Rebuild 32-bit xtajit.dll with WoW64 constructor repair
         shell: bash
         run: bash tools/build-xtajit-wow64.sh
 
