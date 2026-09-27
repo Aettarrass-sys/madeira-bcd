@@ -46,6 +46,11 @@ struct LaunchRequest {
     /// Present the GPU as NVIDIA and answer NVAPI (DXMT's nvapi64.dll,
     /// DXMT_ENABLE_NVEXT), for games that insist on a known vendor's driver.
     var nvidia = false
+    /// Turn off Madeira's in-process fast path for Windows events and waits
+    /// (MADEIRA_FASTSYNC=0), for games whose worker threads free memory another
+    /// thread is still using -- the signature of a wait that returned early.
+    var safeSync = false
+    private static var forcedFastsyncOff = false
 
     func apply() {
         ExperimentalSettings.exportToEnvironment()
@@ -69,6 +74,16 @@ struct LaunchRequest {
         } else {
             unsetenv("DXMT_ENABLE_NVEXT")
             unsetenv("MADEIRA_DXMT_EXTRA")
+        }
+        // Only forced off here; when the switch is off, madeira.cfg's own
+        // env.MADEIRA_FASTSYNC (exported above) still decides.
+        if safeSync {
+            setenv("MADEIRA_FASTSYNC", "0", 1)
+            LaunchRequest.forcedFastsyncOff = true
+        } else if LaunchRequest.forcedFastsyncOff {
+            unsetenv("MADEIRA_FASTSYNC")   // ours from an earlier launch; the cfg export above re-sets its own
+            ExperimentalSettings.exportToEnvironment()
+            LaunchRequest.forcedFastsyncOff = false
         }
         LogStore.shared.startSessionLog(program: programName)
     }
@@ -203,6 +218,7 @@ enum LibraryPrefs {
     private static let avxKey = "madeira.library.avx"
     private static let vcrtKey = "madeira.library.wineVCRT"
     private static let nvidiaKey = "madeira.library.nvidia"
+    private static let safeSyncKey = "madeira.library.safeSync"
 
     private static func dict<T>(_ key: String) -> [String: T] {
         (UserDefaults.standard.dictionary(forKey: key) as? [String: T]) ?? [:]
@@ -234,6 +250,9 @@ enum LibraryPrefs {
 
     static func nvidia(_ windowsPath: String) -> Bool { (dict(nvidiaKey) as [String: Bool])[windowsPath] ?? false }
     static func setNvidia(_ on: Bool, for windowsPath: String) { store(on ? true : nil, nvidiaKey, windowsPath) }
+
+    static func safeSync(_ windowsPath: String) -> Bool { (dict(safeSyncKey) as [String: Bool])[windowsPath] ?? false }
+    static func setSafeSync(_ on: Bool, for windowsPath: String) { store(on ? true : nil, safeSyncKey, windowsPath) }
 }
 
 /// Reads the PE header's Machine field. Two small reads per file, off the main
@@ -665,6 +684,7 @@ struct HomeView: View {
         request.avx = LibraryPrefs.avx(exe.windowsPath)
         request.wineVCRT = LibraryPrefs.wineVCRT(exe.windowsPath)
         request.nvidia = LibraryPrefs.nvidia(exe.windowsPath)
+        request.safeSync = LibraryPrefs.safeSync(exe.windowsPath)
         LibraryPrefs.markPlayed(game.title)
         start(request)
     }
@@ -850,6 +870,7 @@ struct GameSettingsSheet: View {
     @State private var avx: Bool
     @State private var wineVCRT: Bool
     @State private var nvidia: Bool
+    @State private var safeSync: Bool
     @State private var photo: PhotosPickerItem?
     @State private var tick = 0
 
@@ -865,6 +886,7 @@ struct GameSettingsSheet: View {
         _avx = State(initialValue: LibraryPrefs.avx(exe.windowsPath))
         _wineVCRT = State(initialValue: LibraryPrefs.wineVCRT(exe.windowsPath))
         _nvidia = State(initialValue: LibraryPrefs.nvidia(exe.windowsPath))
+        _safeSync = State(initialValue: LibraryPrefs.safeSync(exe.windowsPath))
     }
 
     /// What the exe will get: the typed arguments, else the suggestion.
@@ -959,6 +981,7 @@ struct GameSettingsSheet: View {
                     Toggle("AVX / AVX2", isOn: $avx)
                     Toggle("Wine's C++ runtime", isOn: $wineVCRT)
                     Toggle("Report an NVIDIA GPU", isOn: $nvidia)
+                    Toggle("Safe thread sync (no fastsync)", isOn: $safeSync)
                 } header: {
                     Text("Launch options")
                 } footer: {
@@ -968,7 +991,9 @@ struct GameSettingsSheet: View {
                          + "replaces Microsoft's concrt140/msvcp140_* for a game that crashes right after "
                          + "loading them. Report an NVIDIA GPU makes DXGI name NVIDIA as the vendor and answers "
                          + "NVAPI, for games that stop with \"no graphics card\" or \"failed to get GPU driver "
-                         + "info\" (Ghost of Tsushima).")
+                         + "info\" (Ghost of Tsushima). Safe thread sync turns off Madeira's fast path for "
+                         + "Windows events and waits: slower, for a game whose threads crash on memory another "
+                         + "thread just freed.")
                 }
 
                 Section {
@@ -1018,6 +1043,7 @@ struct GameSettingsSheet: View {
                 avx = LibraryPrefs.avx(newPath)
                 wineVCRT = LibraryPrefs.wineVCRT(newPath)
                 nvidia = LibraryPrefs.nvidia(newPath)
+                safeSync = LibraryPrefs.safeSync(newPath)
             }
             .onChange(of: photo) { _, item in
                 guard let item else { return }
@@ -1042,6 +1068,7 @@ struct GameSettingsSheet: View {
         LibraryPrefs.setAVX(avx, for: exePath)
         LibraryPrefs.setWineVCRT(wineVCRT, for: exePath)
         LibraryPrefs.setNvidia(nvidia, for: exePath)
+        LibraryPrefs.setSafeSync(safeSync, for: exePath)
     }
 }
 

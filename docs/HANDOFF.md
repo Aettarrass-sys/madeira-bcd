@@ -160,6 +160,27 @@ freezes, check whether presents stop while `pso-parallel` batches run
 (pipeline compile time) or with no batches (then it is something else: look
 at the game's worker threads / waits).
 
+### Build 184 result (log 2026-09-27 17:02): crash DURING "Compiling shaders" (97 %)
+No GPU fault, no pipeline stall. The crash is the same memory race seen in
+every earlier run, now clearly independent of the GPU: the view history shows
+a 1 MB + 64 KB block (`0x110000`) CREATED by the main thread 69 s earlier and
+DELETED by a JobWorker 4 ms before the main thread (or another worker) faults
+memcpy'ing 1 MB out of it (source = block + 0x40). Same size and shape in
+four runs. That is one thread releasing a buffer another is still reading —
+on Windows the game waits for its jobs first, so a wait here returned early
+or a signal arrived too soon. Prime suspect: Madeira's in-process fast path
+for events/waits ("fastsync", `MADEIRA_FASTSYNC`, auto-enabled after 20k ops/10 s,
+see `build/ntdll-unix` sync code).
+
+**Build 185**: per-game switch "Safe thread sync (no fastsync)" in the game's
+Launch options (sets `MADEIRA_FASTSYNC=0` for that launch). Test GoT with it ON.
+If the race disappears, the bug is in fastsync (look for a wake that is
+delivered before the waiter's condition is really satisfied, or a
+`WaitForMultipleObjects(waitAll)` / auto-reset event edge case). If it still
+crashes, add a watch: `vmwatch` in madeira.cfg cannot help (addresses differ
+per run); instead log the guest call stack of the thread that frees a
+0x110000 view (NtFreeVirtualMemory caller RIP) and of the reader.
+
 **About the Metal HUD suggestion "adopt MTL4Compiler"**: Metal 4
 (iOS/macOS 26+) has `MTL4Compiler` (explicit compiler objects, async
 compilation with QoS, `MTL4Archive`, flexible render pipeline states that
@@ -178,8 +199,9 @@ launch logs that shader's bytecode once (harmless, ~8 log lines); delete the
 file in the Wine prefix to stop it.
 
 ### Open issues, roughly in priority order
-1. Verify build 183's parallel pipeline builds (above); then pipeline
-   persistence (MTLBinaryArchive). If GPU faults reappear, the fault machinery
+1. The freed-while-read memory race (build 184/185 notes above) — it kills
+   the game even without GPU problems. Then pipeline persistence
+   (MTLBinaryArchive). If GPU faults reappear, the fault machinery
    names the kernel.
 2. **Black squares** on screen (menu and gameplay, fixed grid positions).
    Not explained yet. Candidates: a tiled full-screen compute pass that skips

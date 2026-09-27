@@ -154,6 +154,10 @@ already did.
   eagerly they took 5.1 GB of Metal memory and iOS killed the app at 7.8 GB
   on the loading screen. `pso-lazy = 0` in madeira.cfg restores eager
   creation.
+- Per-game "Safe thread sync (no fastsync)" launch option (`HomeView.swift`,
+  `LaunchRequest.safeSync`): sets `MADEIRA_FASTSYNC=0` for that launch, to test
+  whether Madeira's in-process event/wait fast path lets a wait return early
+  (Ghost of Tsushima's workers free a 1 MB block another thread still reads).
 - Parallel first use of lazy pipelines (`mad_prebuild_lists`): each pipeline
   has its own build lock (was one global lock), and before a batch is replayed
   the not-yet-built pipelines its lists bind are built on up to 4 threads.
