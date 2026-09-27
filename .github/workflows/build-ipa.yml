@@ -768,9 +768,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set +e
+          set -o pipefail
           API="https://api.github.com/repos/$GITHUB_REPOSITORY/releases?per_page=100"
-          ASSET=$(curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$API" \
+          ASSET=$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$API" \
             | python3 -c "
           import json, sys
           rels = json.load(sys.stdin)
@@ -781,7 +782,7 @@ jobs:
                   for a in r.get('assets', []):
                       if a['name'].lower().endswith(('.dmg', '.pkg')):
                           print(a['url'], a['name']); sys.exit(0)
-          ")
+          ") || { echo "::error::GitHub release API request failed"; exit 1; }
           if [ -z "$ASSET" ]; then
             # madeira-bcd: a stub build draws nothing in any D3D12 game (build 180
             # after the release was deleted); fail instead of shipping one.
@@ -790,7 +791,9 @@ jobs:
           fi
           URL=${ASSET%% *}; NAME=${ASSET#* }
           mkdir -p /tmp/msc && cd /tmp/msc
-          curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" -o "$NAME" "$URL"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 --retry-max-time 120 \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" -o "$NAME" "$URL" \
+            || { echo "::error::Metal Shader Converter download failed"; exit 1; }
           echo "downloaded $NAME: $(wc -c < "$NAME" | tr -d ' ') bytes, sha256 $(shasum -a 256 "$NAME" | cut -d' ' -f1)"
           echo "0e7b6c83617a0b67905614579e82031d177ed49cfaacccb0aaef6ddadf19107c  $NAME" \
             | shasum -a 256 -c - || exit 1
