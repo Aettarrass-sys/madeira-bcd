@@ -154,6 +154,12 @@ already did.
   eagerly they took 5.1 GB of Metal memory and iOS killed the app at 7.8 GB
   on the loading screen. `pso-lazy = 0` in madeira.cfg restores eager
   creation.
+- Parallel first use of lazy pipelines (`mad_prebuild_lists`): each pipeline
+  has its own build lock (was one global lock), and before a batch is replayed
+  the not-yet-built pipelines its lists bind are built on up to 4 threads.
+  Ghost of Tsushima's first gameplay seconds needed hundreds at once and
+  `ExecuteCommandLists` reached 2.3 s per frame. `pso-parallel = 0` in
+  madeira.cfg turns it off.
 - Persistent shader cache (`madeira_d3d12.c` `mad_ir_convert_cached`): every
   DXIL/DXBC -> metallib conversion is keyed by a hash of all its inputs
   (bytecode, entry, root signature, static samplers, input layout, paired

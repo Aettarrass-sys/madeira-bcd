@@ -86,7 +86,7 @@ static samplers (black screen) -> intros + main menu work -> New Game OOM
 persistent disk shader cache -> game reaches gameplay (~20-40 FPS) ->
 **GPU timeout a few seconds into gameplay** (the remaining blocker).
 
-### The GPU timeout (build 181 should fix it — verify)
+### The GPU timeout (fixed in build 181, confirmed on device)
 Every run: 2-5 s into gameplay FPS sinks from ~40 to ~20, then Metal ends a
 command buffer with `MTLCommandBufferError` code 2 (timeout), ignores the queue,
 and the game tears itself down (its workers then fault copying freed memory,
@@ -108,9 +108,56 @@ minutes and looks frozen — do not close it).
 on, press Enter at the dark launcher, New Game) and check the log: there
 should be no `GPU fault` line and FPS should stay flat.
 
+### Build 181 result (log 2026-09-27 14:55, 800x600): the GPU timeout is GONE
+No `GPU fault` line at all; the scene renders (banners, grass) at 50-60 FPS
+before gameplay. The new wall is on the CPU: when gameplay starts,
+`ExecuteCommandLists` per frame goes 25 ms -> 273 ms -> 2.3 s while the GPU
+is 2-7 % busy (Metal HUD: "Detected high CPU encoding cost with encoders
+spending an average of 100% of frame time encoding"; "Compiled Shaders 693 |
+12.5 s"). Cause: lazy pipelines (`mad_pso_realize`) are compiled by Metal at
+their first draw, on the submitting thread, one at a time, under one global
+lock; the first gameplay seconds need hundreds. After ~2 s frames the game
+stops itself at the same `int3` it uses for fatal errors (guest RIP ...9acd,
+call chain ...b950 / ...63e5) — most likely its own hang watchdog.
+
+**Build 182** (commit "parallel first use"): a per-pipeline lock replaces the
+global one, and before a batch is replayed the lazy pipelines its lists bind
+are built on up to 4 threads (`mad_prebuild_lists`, madeira.cfg
+`pso-parallel = 0` to disable; log line `pso-parallel: built N pipelines`).
+Expected: the stall shrinks roughly by the core count. If frames still take
+seconds, next steps (in order of payoff):
+1. **Persist compiled pipelines across launches** with `MTLBinaryArchive`
+   (or Metal 4 `MTL4Archive`): add winemetal calls to create/load an archive,
+   add pipeline descriptors to it, serialize it next to the shader cache
+   (`%LOCALAPPDATA%\Madeira\ShaderCache\<build>\`), and pass it as
+   `binaryArchives` when creating pipelines. Second launch then compiles
+   nothing. Needs changes in `research/dxmt/src/winemetal` (done at build
+   time through a `tools/patch-dxmt-*.py`, like the fault-info patch).
+2. Start building a lazy pipeline in the background at `CreatePipelineState`
+   time at low priority, capped by Metal memory (eager creation of all
+   ~14k pipelines hit 5.1 GB and jetsam before; do not go back to that).
+
+**About the Metal HUD suggestion "adopt MTL4Compiler"**: Metal 4
+(iOS/macOS 26+) has `MTL4Compiler` (explicit compiler objects, async
+compilation with QoS, `MTL4Archive`, flexible render pipeline states that
+share compiled vertex/fragment code). Madeira's bridge (DXMT winemetal) is
+written against the classic `MTLDevice newRenderPipelineState...` API and the
+converter emits classic metallibs; moving to MTL4 means rewriting the
+winemetal pipeline/command-buffer layer, a large job. The same benefits for
+this problem (no main-thread compile stalls, reuse across launches) are
+available with less risk via parallel builds (done) and `MTLBinaryArchive`
+(item 1 above). The HUD's other hints ("high number of interleaved blit
+encoders", "render passes with similar attachments") are performance notes,
+not errors.
+
+Note: `C:\madeira-cs\fault-shaders.txt` keeps hash 34c565ac8322ab2a, so every
+launch logs that shader's bytecode once (harmless, ~8 log lines); delete the
+file in the Wine prefix to stop it.
+
 ### Open issues, roughly in priority order
-1. Verify the timeout fix (above). If faults remain, the machinery names the
-   next kernel.
+1. Verify build 182's parallel pipeline builds (above); then pipeline
+   persistence (MTLBinaryArchive). If GPU faults reappear, the fault machinery
+   names the kernel.
 2. **Black squares** on screen (menu and gameplay, fixed grid positions).
    Not explained yet. Candidates: a tiled full-screen compute pass that skips
    tiles, the missing R32G32B32_FLOAT texture format (`texture format 6 has no

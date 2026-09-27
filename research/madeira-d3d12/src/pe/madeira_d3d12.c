@@ -619,6 +619,7 @@ struct mad_pso {
     int lazy;   /* madeira-bcd: plain render pipeline built at its first draw (mad_pso_realize) */
     int lazy_cs;   /* madeira-bcd: compute pipeline built at its first dispatch */
     UINT64 cs_hash; UINT cs_len;   /* madeira-bcd: FNV-1a of the CS bytecode, for GPU fault reports */
+    SRWLOCK rlock;                 /* madeira-bcd: serialises this pipeline's lazy build (zero = SRWLOCK_INIT) */
     char vs_name[64], ps_name[64];                  /* ml879: for the draw dump */
     char blend[400];                                /* ml1106/ml1107: every RT's blend state for the draw dump */
     UINT root_off[MAD_ROOT_PARAM_MAX]; int has_root_off; /* ml882: offsets from the converter's reflection */
@@ -2784,11 +2785,10 @@ static enum WMTPrimitiveType mad_prim(D3D12_PRIMITIVE_TOPOLOGY t) {
  * small fraction of them. A plain (no GS, no tessellation) pipeline now keeps
  * its descriptors and is built by the first draw that uses it; unused ones
  * never cost GPU memory. madeira.cfg pso-lazy = 0 restores eager creation. */
-static SRWLOCK g_pso_lazy_lock = SRWLOCK_INIT;
 static volatile LONG g_pso_lazy_built, g_pso_lazy_failed;
 static obj_handle_t mad_pso_realize(struct mad_pso *p) {
     if (p->rps || !p->lazy) return p->rps;
-    AcquireSRWLockExclusive(&g_pso_lazy_lock);
+    AcquireSRWLockExclusive(&p->rlock);   /* per pipeline: builds of different pipelines run in parallel */
     if (!p->rps && p->lazy) {
         obj_handle_t err = 0;
         p->rps = p->has_vd ? MTLDevice_newRenderPipelineStateVD(p->device_handle, &p->rp, &p->vd, &err)
@@ -2805,13 +2805,13 @@ static obj_handle_t mad_pso_realize(struct mad_pso *p) {
                                   p->vs_name, p->ps_name);
         }
     }
-    ReleaseSRWLockExclusive(&g_pso_lazy_lock);
+    ReleaseSRWLockExclusive(&p->rlock);
     return p->rps;
 }
 
 static obj_handle_t mad_cpso_realize(struct mad_pso *p) {
     if (p->cps || !p->lazy_cs) return p->cps;
-    AcquireSRWLockExclusive(&g_pso_lazy_lock);
+    AcquireSRWLockExclusive(&p->rlock);
     if (!p->cps && p->lazy_cs) {
         struct WMTComputePipelineInfo ci; obj_handle_t err = 0;
         memset(&ci, 0, sizeof ci);
@@ -2824,8 +2824,63 @@ static obj_handle_t mad_cpso_realize(struct mad_pso *p) {
             if (n <= 8) d3d12_log("[madeira-d3d12] lazy compute pipeline failed at first dispatch (%s); its dispatches are skipped\n", p->vs_name);
         } else InterlockedIncrement(&g_pso_lazy_built);
     }
-    ReleaseSRWLockExclusive(&g_pso_lazy_lock);
+    ReleaseSRWLockExclusive(&p->rlock);
     return p->cps;
+}
+
+/* madeira-bcd: PARALLEL FIRST USE. A lazy pipeline is compiled by Metal at
+ * its first draw, on the submitting thread, one after another. Ghost of
+ * Tsushima's first gameplay seconds need hundreds: ExecuteCommandLists grew
+ * from 25 ms to 273 ms to 2.3 s per frame (GPU 2-7 % busy, Metal HUD "high CPU
+ * encoding cost ... 100 % of frame time"), and the game gave up. Before a
+ * batch is replayed, the pipelines its lists will bind that are not built yet
+ * are built on up to 4 threads at once (Metal compiles independent pipelines
+ * concurrently). madeira.cfg pso-parallel = 0 turns it off. */
+struct mad_prebuild { struct mad_pso **v; LONG n; volatile LONG next; };
+static DWORD WINAPI mad_prebuild_worker(void *arg) {
+    struct mad_prebuild *w = arg;
+    obj_handle_t pool = NSAutoreleasePool_alloc_init();
+    LONG i;
+    while ((i = InterlockedIncrement(&w->next) - 1) < w->n) {
+        struct mad_pso *p = w->v[i];
+        if (p->is_compute) mad_cpso_realize(p); else mad_pso_realize(p);
+    }
+    if (pool) NSObject_release(pool);
+    return 0;
+}
+static void mad_prebuild_lists(UINT count, ID3D12CommandList *const *lists) {
+    static int on = -1;
+    static volatile LONG g_prebuilt, g_prebuild_batches;
+    struct mad_pso *v[256]; LONG n = 0; UINT i, k, j;
+    if (on < 0) on = mad_cfg_int_pe("pso-parallel", 1) ? 1 : 0;
+    if (!on) return;
+    for (i = 0; i < count && n < 256; i++) {
+        struct mad_list *l = (struct mad_list *)lists[i];
+        if (!l || !l->closed) continue;
+        for (k = 0; k < l->ncmds && n < 256; k++) {
+            struct mad_pso *p = l->cmds[k].kind == MC_PSO ? l->cmds[k].u.pso : NULL;
+            if (!p) continue;
+            if (p->is_compute ? (p->cps || !p->lazy_cs) : (p->rps || !p->lazy)) continue;
+            for (j = 0; j < (UINT)n && v[j] != p; j++) ;
+            if (j == (UINT)n) v[n++] = p;
+        }
+    }
+    if (n < 2) return;   /* one pipeline: the draw builds it itself */
+    {
+        struct mad_prebuild w; HANDLE th[3]; unsigned nt = 0, t;
+        w.v = v; w.n = n; w.next = 0;
+        for (t = 0; t < 3 && t + 1 < (unsigned)n; t++) {
+            th[nt] = CreateThread(NULL, 256 << 10, mad_prebuild_worker, &w, 0, NULL);
+            if (th[nt]) nt++;
+        }
+        mad_prebuild_worker(&w);
+        if (nt) WaitForMultipleObjects(nt, th, TRUE, INFINITE);
+        for (t = 0; t < nt; t++) CloseHandle(th[t]);
+        InterlockedExchangeAdd(&g_prebuilt, n);
+        if (InterlockedIncrement(&g_prebuild_batches) <= 8 || n >= 32)
+            d3d12_log("[madeira-d3d12] pso-parallel: built %ld pipelines on %u threads before replay (%ld so far)\n",
+                      n, nt + 1, g_prebuilt);
+    }
 }
 
 /* ml878: pipeline variant for the strides a draw actually binds. */
@@ -4772,6 +4827,7 @@ static void mad_ecl_run(ID3D12CommandQueue *This, UINT count, ID3D12CommandList 
     if (ml1021_q) EnterCriticalSection(&ml1021_q->submit_lock);
 
     struct mad_queue *q = (struct mad_queue *)This;
+    mad_prebuild_lists(count, lists);   /* madeira-bcd */
     for (UINT i = 0; i < count; i++) {
         struct mad_list *l = (struct mad_list *)lists[i];
         if (l && !l->closed) {
