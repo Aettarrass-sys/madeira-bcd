@@ -241,6 +241,18 @@ call site before changing scheduling or memory-lifetime semantics.
 The diagnostic code and these notes were pushed together as commit
 `6d758e544cffeff98ad8a7720b96690ec053cdc7` on the development branch.
 
+**Build dispatch status (2026-09-27, Codex):** The owner authorized automatic
+workflow dispatch after every error report, now recorded above. The GitHub
+connector can push commits but does not expose `workflow_dispatch`; the
+cloud-browser GitHub login reached the two-factor app-code step, then GitHub
+returned “Your browser did something unexpected” after verification. A fresh
+workflow tab remained signed out. No new workflow run or IPA has been created
+yet; do **not** report build 186 as started. The development branch now includes
+the diagnostic commit plus the handoff authorization note (`2e4de7f8`), while
+`main` remains at the previous tested commit. Resume with an authenticated
+GitHub Actions dispatch on `claude/madeira-bcd-repo-ymg5cb`, inspect the run,
+and fast-forward `main` only after a successful build.
+
 **About the Metal HUD suggestion "adopt MTL4Compiler"**: Metal 4
 (iOS/macOS 26+) has `MTL4Compiler` (explicit compiler objects, async
 compilation with QoS, `MTL4Archive`, flexible render pipeline states that
