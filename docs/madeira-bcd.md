@@ -183,6 +183,13 @@ already did.
   first gameplay frames, Metal then ignored the queue and the game stopped
   itself, and the error named no shader. `gpu-fault-info = 0` /
   `gpu-fault-skip = 0` in madeira.cfg turn it off / keep such pipelines.
+- UAV counters for DXBC shaders (`mad_uavctr_*`): `CreateUnorderedAccessView`'s
+  counter resource was ignored and the sm5 table's counter word was 0, so a
+  shader appending to a buffer wrote through a null pointer (a GPU page fault;
+  DXMT's own comment on that 0 says as much). The counter address
+  (`counter->gpu_address + CounterOffsetInBytes`) is remembered by the view's
+  buffer address and written into the table. DXIL (Metal Shader Converter)
+  shaders still get no counter.
 - 64-bit allocations above the 32-bit windows (`build/ntdll-unix/virtual_ios.c`,
   `ios_wow_high_side`): with PR #28's slot-0 placeholder at 0x7100000000,
   window exclusion kept only the band below it, so a 64-bit program's clamped
