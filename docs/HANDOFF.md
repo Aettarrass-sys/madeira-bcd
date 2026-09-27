@@ -120,7 +120,7 @@ lock; the first gameplay seconds need hundreds. After ~2 s frames the game
 stops itself at the same `int3` it uses for fatal errors (guest RIP ...9acd,
 call chain ...b950 / ...63e5) — most likely its own hang watchdog.
 
-**Build 182** (commit "parallel first use"): a per-pipeline lock replaces the
+**Build 183** (commit "build a batch's new pipelines in parallel"): a per-pipeline lock replaces the
 global one, and before a batch is replayed the lazy pipelines its lists bind
 are built on up to 4 threads (`mad_prebuild_lists`, madeira.cfg
 `pso-parallel = 0` to disable; log line `pso-parallel: built N pipelines`).
@@ -155,7 +155,7 @@ launch logs that shader's bytecode once (harmless, ~8 log lines); delete the
 file in the Wine prefix to stop it.
 
 ### Open issues, roughly in priority order
-1. Verify build 182's parallel pipeline builds (above); then pipeline
+1. Verify build 183's parallel pipeline builds (above); then pipeline
    persistence (MTLBinaryArchive). If GPU faults reappear, the fault machinery
    names the kernel.
 2. **Black squares** on screen (menu and gameplay, fixed grid positions).
