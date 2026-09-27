@@ -137,6 +137,29 @@ seconds, next steps (in order of payoff):
    time at low priority, capped by Metal memory (eager creation of all
    ~14k pipelines hit 5.1 GB and jetsam before; do not go back to that).
 
+### Build 183 result (log 2026-09-27 15:34)
+Main menu much smoother (ExecuteCommandLists ~2 ms/frame, 45-48 FPS; parallel
+builds working: `pso-parallel: built 20..69 pipelines on 4 threads`). Gameplay
+start still froze: presents stopped right after the first large prebuild
+batches, then the game tore itself down (workers faulted on memory another
+worker freed — the usual teardown symptom). Two problems visible in the log:
+* each prebuild batch CREATED 3 Wine threads: every one costs an 8 MB stack
+  (floored), a TEB and FEX thread state — a storm of `init_thread_stack` lines
+  and failing 8 MB reserves (`[va-scan] FAILED ... size=0x800000`).
+* the 64-bit high-band fallback only searched 0x7200000000..0x73ffff0000,
+  which is already occupied on device (every `[wow-window] #N ... NOT placed`),
+  and a 1 MB FEX allocation still got STATUS_NO_MEMORY.
+Also note: this run had 16,968 shader-cache misses because the cache key
+includes the madeira_d3d12 build stamp — every new build re-converts every
+shader once (first launch after an update is slow; second launch is not).
+
+**Build 184**: a persistent pool of 3 prebuild threads (created once), and the
+high-band fallback searches everything above the 32-bit windows up to the
+user-space limit (still bounded by a caller's limit_high). If gameplay still
+freezes, check whether presents stop while `pso-parallel` batches run
+(pipeline compile time) or with no batches (then it is something else: look
+at the game's worker threads / waits).
+
 **About the Metal HUD suggestion "adopt MTL4Compiler"**: Metal 4
 (iOS/macOS 26+) has `MTL4Compiler` (explicit compiler objects, async
 compilation with QoS, `MTL4Archive`, flexible render pipeline states that

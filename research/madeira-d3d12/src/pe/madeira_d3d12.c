@@ -2836,17 +2836,43 @@ static obj_handle_t mad_cpso_realize(struct mad_pso *p) {
  * batch is replayed, the pipelines its lists will bind that are not built yet
  * are built on up to 4 threads at once (Metal compiles independent pipelines
  * concurrently). madeira.cfg pso-parallel = 0 turns it off. */
-struct mad_prebuild { struct mad_pso **v; LONG n; volatile LONG next; };
-static DWORD WINAPI mad_prebuild_worker(void *arg) {
-    struct mad_prebuild *w = arg;
-    obj_handle_t pool = NSAutoreleasePool_alloc_init();
+/* One persistent pool: creating Wine threads per batch cost an 8 MB stack,
+ * a TEB and an emulator thread state each time (seen as a storm of
+ * init_thread_stack lines and failed 8 MB reserves). */
+struct mad_prebuild { struct mad_pso **v; LONG n; volatile LONG next; volatile LONG done; };
+static struct mad_prebuild *volatile g_pb_work;
+static HANDLE g_pb_go, g_pb_idle;
+static LONG g_pb_threads;
+static void mad_prebuild_run(struct mad_prebuild *w) {
     LONG i;
     while ((i = InterlockedIncrement(&w->next) - 1) < w->n) {
         struct mad_pso *p = w->v[i];
         if (p->is_compute) mad_cpso_realize(p); else mad_pso_realize(p);
+        InterlockedIncrement(&w->done);
     }
-    if (pool) NSObject_release(pool);
+}
+static DWORD WINAPI mad_prebuild_worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        obj_handle_t pool;
+        WaitForSingleObject(g_pb_go, INFINITE);
+        pool = NSAutoreleasePool_alloc_init();
+        if (g_pb_work) mad_prebuild_run(g_pb_work);
+        if (pool) NSObject_release(pool);
+        ReleaseSemaphore(g_pb_idle, 1, NULL);
+    }
     return 0;
+}
+static void mad_prebuild_start(void) {
+    static LONG once; unsigned t;
+    if (InterlockedExchange(&once, 1)) return;
+    g_pb_go = CreateSemaphoreA(NULL, 0, 8, NULL);
+    g_pb_idle = CreateSemaphoreA(NULL, 0, 8, NULL);
+    if (!g_pb_go || !g_pb_idle) return;
+    for (t = 0; t < 3; t++) {
+        HANDLE h = CreateThread(NULL, 256 << 10, mad_prebuild_worker, NULL, 0, NULL);
+        if (h) { CloseHandle(h); g_pb_threads++; }
+    }
 }
 static void mad_prebuild_lists(UINT count, ID3D12CommandList *const *lists) {
     static int on = -1;
@@ -2867,18 +2893,21 @@ static void mad_prebuild_lists(UINT count, ID3D12CommandList *const *lists) {
     }
     if (n < 2) return;   /* one pipeline: the draw builds it itself */
     {
-        struct mad_prebuild w; HANDLE th[3]; unsigned nt = 0, t;
-        w.v = v; w.n = n; w.next = 0;
-        for (t = 0; t < 3 && t + 1 < (unsigned)n; t++) {
-            th[nt] = CreateThread(NULL, 256 << 10, mad_prebuild_worker, &w, 0, NULL);
-            if (th[nt]) nt++;
-        }
-        mad_prebuild_worker(&w);
-        if (nt) WaitForMultipleObjects(nt, th, TRUE, INFINITE);
-        for (t = 0; t < nt; t++) CloseHandle(th[t]);
+        static SRWLOCK serial = SRWLOCK_INIT;   /* one batch at a time uses the pool */
+        struct mad_prebuild w; LONG nt, t;
+        mad_prebuild_start();
+        AcquireSRWLockExclusive(&serial);
+        w.v = v; w.n = n; w.next = 0; w.done = 0;
+        nt = g_pb_threads < n - 1 ? g_pb_threads : n - 1;
+        g_pb_work = &w;
+        if (nt > 0) ReleaseSemaphore(g_pb_go, nt, NULL);
+        mad_prebuild_run(&w);
+        for (t = 0; t < nt; t++) WaitForSingleObject(g_pb_idle, INFINITE);
+        g_pb_work = NULL;
+        ReleaseSRWLockExclusive(&serial);
         InterlockedExchangeAdd(&g_prebuilt, n);
         if (InterlockedIncrement(&g_prebuild_batches) <= 8 || n >= 32)
-            d3d12_log("[madeira-d3d12] pso-parallel: built %ld pipelines on %u threads before replay (%ld so far)\n",
+            d3d12_log("[madeira-d3d12] pso-parallel: built %ld pipelines on %ld threads before replay (%ld so far)\n",
                       n, nt + 1, g_prebuilt);
     }
 }

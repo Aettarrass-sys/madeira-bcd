@@ -16153,7 +16153,15 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
                  * 64-bit program was confined below the first slot's placeholder
                  * (0x7038000000..0x7100000000, 3.2 GB) and never used the band
                  * above it. Remember that high side for when the low one is full. */
-                if (excl_end < end) ios_wow_high_side( excl_end, end, &wow_hi_start, &wow_hi_end );
+                if (excl_end < end)
+                {
+                    /* the whole space above the windows, not only up to the furniture
+                     * ceiling: [0x7200000000, ceiling) was already taken on device (the
+                     * fallback never placed anything there); a caller's own limit_high
+                     * still bounds it */
+                    void *hi_end = limit_high ? end : (void *)min( user_space_limit, host_addr_space_limit );
+                    ios_wow_high_side( excl_end, hi_end, &wow_hi_start, &wow_hi_end );
+                }
                 start = excl_start; end = excl_end;
             }
         }

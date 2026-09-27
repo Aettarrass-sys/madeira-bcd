@@ -158,8 +158,12 @@ already did.
   has its own build lock (was one global lock), and before a batch is replayed
   the not-yet-built pipelines its lists bind are built on up to 4 threads.
   Ghost of Tsushima's first gameplay seconds needed hundreds at once and
-  `ExecuteCommandLists` reached 2.3 s per frame. `pso-parallel = 0` in
-  madeira.cfg turns it off.
+  `ExecuteCommandLists` reached 2.3 s per frame. The helpers are a persistent
+  pool of 3 threads (creating Wine threads per batch cost an 8 MB stack, a TEB
+  and FEX state each). `pso-parallel = 0` in madeira.cfg turns it off.
+- The 64-bit fallback above the 32-bit windows (`ios_wow_high_side`) searches
+  up to the user-space limit, not only to the furniture ceiling: on device
+  0x7200000000..0x73ffff0000 is already occupied.
 - Persistent shader cache (`madeira_d3d12.c` `mad_ir_convert_cached`): every
   DXIL/DXBC -> metallib conversion is keyed by a hash of all its inputs
   (bytecode, entry, root signature, static samplers, input layout, paired
