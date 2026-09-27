@@ -183,6 +183,15 @@ already did.
   first gameplay frames, Metal then ignored the queue and the game stopped
   itself, and the error named no shader. `gpu-fault-info = 0` /
   `gpu-fault-skip = 0` in madeira.cfg turn it off / keep such pipelines.
+- View history and stack quarantine (`build/ntdll-unix/virtual_ios.c`,
+  `ios_vh_*`, `ios_stack_release`): Ghost of Tsushima's worker threads faulted
+  copying 2 MB from a range that had been an exited thread's native stack and
+  had no Wine view any more. Guest-band views of 1 MB or more are recorded when
+  created and deleted (thread, time, reason), and a fault on an address Wine
+  does not own prints the records that covered it (`[fault-rgn] history:`).
+  An exited thread's native stack is decommitted but kept reserved for the
+  next 8 stack frees before release; if it was freed or replaced meanwhile the
+  release is skipped and `[stack-quarantine] ... FREED OR REPLACED` is logged.
 - Texture UAV clears (`mad_record_uav_tex_clear`, `MC_FILL_TEX`):
   `ClearUnorderedAccessViewUint/Float` on a texture view used to be skipped.
   The view's mip, slices and format are remembered by view id at
