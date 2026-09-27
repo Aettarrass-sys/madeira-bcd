@@ -762,8 +762,10 @@ jobs:
                           print(a['url'], a['name']); sys.exit(0)
           ")
           if [ -z "$ASSET" ]; then
-            echo "::warning::no msc-private release with a .dmg/.pkg asset -- D3D12 conversion stays a stub"
-            exit 0
+            # madeira-bcd: a stub build draws nothing in any D3D12 game (build 180
+            # after the release was deleted); fail instead of shipping one.
+            echo "::error::no msc-private release with a .dmg/.pkg asset -- a D3D12 stub build draws nothing; re-create the DRAFT release"
+            exit 1
           fi
           URL=${ASSET%% *}; NAME=${ASSET#* }
           mkdir -p /tmp/msc && cd /tmp/msc
