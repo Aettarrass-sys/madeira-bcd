@@ -188,8 +188,12 @@ already did.
   shader appending to a buffer wrote through a null pointer (a GPU page fault;
   DXMT's own comment on that 0 says as much). The counter address
   (`counter->gpu_address + CounterOffsetInBytes`) is remembered by the view's
-  buffer address and written into the table. DXIL (Metal Shader Converter)
-  shaders still get no counter.
+  buffer address and written into the table. For DXIL (Metal Shader
+  Converter) shaders the counter is what `IRRuntimeCreateAppendBufferView`
+  builds: an R32Uint texture-buffer view over the counter's 4 bytes, named by
+  the UAV descriptor's texture id, with its element offset in metadata bits
+  32..39 (the descriptor used to carry texture id 0, so the converter's
+  counter atomics hit nothing).
 - 64-bit allocations above the 32-bit windows (`build/ntdll-unix/virtual_ios.c`,
   `ios_wow_high_side`): with PR #28's slot-0 placeholder at 0x7100000000,
   window exclusion kept only the band below it, so a 64-bit program's clamped

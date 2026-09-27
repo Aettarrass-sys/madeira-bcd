@@ -6264,7 +6264,7 @@ static void STDMETHODCALLTYPE device_CreateUnorderedAccessView(ID3D12Device *Thi
     if (!e) return;
     if (!r) { memset(e, 0, sizeof *e); return; }                                /* a null view */
     if (counter && !said_counter++)
-        d3d12_log("[madeira-d3d12] CreateUnorderedAccessView: counter resources reach DXBC shaders only (madeira-bcd); DXIL ones still see none\n");
+        d3d12_log("[madeira-d3d12] CreateUnorderedAccessView: counter resources are bound (madeira-bcd)\n");
     if (r->buffer) {
         UINT64 stride = 4, first = 0, num = r->size / 4;
         if (desc && desc->ViewDimension == D3D12_UAV_DIMENSION_BUFFER) {
@@ -6285,6 +6285,27 @@ static void STDMETHODCALLTYPE device_CreateUnorderedAccessView(ID3D12Device *Thi
                 desc->Buffer.CounterOffsetInBytes + 4 <= cr->size)
                 cva = cr->gpu_address + desc->Buffer.CounterOffsetInBytes;
             if (cva || mad_uavctr_get(e->gpu_va)) mad_uavctr_put(e->gpu_va, cva);
+            /* DXIL (Metal Shader Converter): the counter is an R32Uint texture-
+             * buffer view named by the descriptor's texture id, its element
+             * offset in metadata bits 32..39 (IRRuntimeCreateAppendBufferView /
+             * IRDescriptorTableGetBufferMetadata). The converter's shaders did
+             * their counter atomics on texture id 0. */
+            if (cva) {
+                struct mad_descriptor cd;
+                static unsigned said_ctr;
+                if (mad_typed_buffer_view((struct mad_device *)This, cr, DXGI_FORMAT_R32_UINT,
+                                          desc->Buffer.CounterOffsetInBytes / 4, 1, 1, &cd)) {
+                    UINT64 elem_off = (cd.metadata >> 32) & 0x7fffffffull;
+                    e->texture_view_id = cd.texture_view_id;
+                    e->metadata = (e->metadata & 0xffffffffull) | ((elem_off & 0xffull) << 32);
+                    if (said_ctr++ < 4)
+                        d3d12_log("[madeira-d3d12] UAV counter: buffer '%s' +%llu -> texture-buffer view, element offset %llu\n",
+                                  cr->name ? cr->name : "?", (unsigned long long)desc->Buffer.CounterOffsetInBytes,
+                                  (unsigned long long)elem_off);
+                } else if (said_ctr++ < 4)
+                    d3d12_log("[madeira-d3d12] UAV counter: no texture-buffer view for buffer '%s' +%llu; DXIL shaders see none\n",
+                              cr->name ? cr->name : "?", (unsigned long long)desc->Buffer.CounterOffsetInBytes);
+            }
         }
         return;
     }
