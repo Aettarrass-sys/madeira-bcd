@@ -27,6 +27,14 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Require the matching private converter package
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.tag_name == "msc-private" and .draft) | .assets[] | select(.name == "Metal_Shader_Converter_4.0_beta_2.pkg") | .id' \
+            | grep -q '[0-9]'
+
       # ContentView.swift uses glassEffect(.regular, in:), which needs the
       # iOS 26 SDK. The runner defaults to Xcode 16.4 (iOS 18.5), so pick the
       # newest Xcode installed rather than whatever xcode-select points at.
@@ -771,6 +779,8 @@ jobs:
           mkdir -p /tmp/msc && cd /tmp/msc
           curl -sSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" -o "$NAME" "$URL"
           echo "downloaded $NAME: $(wc -c < "$NAME" | tr -d ' ') bytes, sha256 $(shasum -a 256 "$NAME" | cut -d' ' -f1)"
+          echo "0e7b6c83617a0b67905614579e82031d177ed49cfaacccb0aaef6ddadf19107c  $NAME" \
+            | shasum -a 256 -c - || exit 1
           PKG=""
           case "$NAME" in
             *.dmg|*.DMG)
@@ -836,6 +846,12 @@ jobs:
             done
           fi
           exit "$rc"
+
+      - name: Verify iOS 18 deployment target
+        run: |
+          app=build-out/Madeira.xcarchive/Products/Applications/Madeira.app
+          test "$(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist")" = 18.0
+          xcrun vtool -show-build "$app/Madeira" | grep -Eq 'minos[[:space:]]+18[.]0'
 
       - name: Combine DXMT + LLVM into libdxmt_combined.a
         shell: bash
