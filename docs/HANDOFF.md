@@ -253,6 +253,15 @@ the diagnostic commit plus the handoff authorization note (`2e4de7f8`), while
 GitHub Actions dispatch on `claude/madeira-bcd-repo-ymg5cb`, inspect the run,
 and fast-forward `main` only after a successful build.
 
+**Update 2026-09-27 18:53 (UTC+3):** The owner completed GitHub sign-in in the
+cloud browser. Codex dispatched `build-ipa.yml` from
+`claude/madeira-bcd-repo-ymg5cb` at commit
+`0c925759891f7e63a2267faec2f63f63b34fbeb0`.
+Workflow **#186**, run **36331180977**:
+`https://github.com/bahacan16/madeira-bcd/actions/runs/36331180977`.
+Initial status `in_progress`; await result and artifact before declaring an IPA
+ready or advancing `main`.
+
 **About the Metal HUD suggestion "adopt MTL4Compiler"**: Metal 4
 (iOS/macOS 26+) has `MTL4Compiler` (explicit compiler objects, async
 compilation with QoS, `MTL4Archive`, flexible render pipeline states that
