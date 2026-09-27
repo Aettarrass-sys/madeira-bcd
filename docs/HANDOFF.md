@@ -39,6 +39,12 @@ Upstream PRs merged into the fork (not yet merged upstream):
   dispatch the development-branch workflow, inspect its result, and hand over
   the IPA run/artifact link. Keep this handoff append-only in substance so
   Claude and Codex can alternate without losing earlier findings.
+* **Build monitoring preference (owner, 2026-09-27):** After dispatch, verify
+  that the run started, then check its status **once about 10 minutes later**.
+  Do not poll every step or send running-status screenshots; those wasted
+  tokens during build 186. If still running, check again at a sensible longer
+  interval, and report the final result and artifact link. Send a screenshot
+  only when the owner asks for one.
 * Develop on branch **`claude/madeira-bcd-repo-ymg5cb`**, push there.
 * Build: dispatch `.github/workflows/build-ipa.yml` on that branch
   (workflow_dispatch). When it is green, fast-forward `main`
