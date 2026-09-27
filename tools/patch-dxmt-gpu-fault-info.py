@@ -49,6 +49,10 @@ ADDITION = """  case 8: {   /* madeira-bcd: GPU fault attribution (tools/patch-d
     @autoreleasepool {
       NSError *err = [(id<MTLCommandBuffer>)(uintptr_t)t->cb error];
       NSArray *infos = err ? err.userInfo[MTLCommandBufferEncoderInfoErrorKey] : nil;
+      if (err) {   /* the MTLCommandBufferError code: 3 timeout, 4 page fault, ... */
+        int w0 = snprintf(out, cap, "code %ld (%s): ", (long)err.code, err.domain.UTF8String ? err.domain.UTF8String : "?");
+        if (w0 > 0 && (size_t)w0 < cap) n = (size_t)w0;
+      }
       for (int pass = 0; pass < 2; pass++) {
         for (id<MTLCommandBufferEncoderInfo> info in infos) {
           MTLCommandEncoderErrorState st = info.errorState;
@@ -65,7 +69,7 @@ ADDITION = """  case 8: {   /* madeira-bcd: GPU fault attribution (tools/patch-d
             else continue;
           }
           if (n + 32 >= cap) break;
-          w = snprintf(out + n, cap - n, "%s[%s] %s", n ? "; " : "", sn,
+          w = snprintf(out + n, cap - n, "%s[%s] %s", (n && out[n - 2] != ':') ? "; " : "", sn,
                        info.label.length ? info.label.UTF8String : "(no label)");
           if (w < 0 || (size_t)w >= cap - n) { n = cap - 1; break; }
           n += (size_t)w;

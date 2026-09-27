@@ -1371,6 +1371,7 @@ struct mad_exec {
     int f7_next_rts;            /* ml1137: exec_end called by exec_begin_render: rt/depth are the NEXT pass's targets */
     /* madeira-bcd: GPU fault attribution (mad_fault_*), only after a first fault */
     struct mad_pso *cenc_pso;   /* the one pipeline the open compute encoder runs */
+    unsigned cenc_seq;          /* its label's C#<seq> */
     struct mad_pso *diag_pso[6]; unsigned diag_npso; int diag_more;   /* pipelines the open render pass drew with */
 };
 static void mad_capture_pass(struct mad_exec *e, struct mad_resource **rt, unsigned nrt, const struct mad_rtvp *rtp,
@@ -2230,6 +2231,96 @@ static void mad_fault_parse(const char *entry, const char *end) {
         f = q;
     }
 }
+/* madeira-bcd: after the first fault, every dispatch's bindings are copied
+ * into a small ring keyed by its encoder's C#<seq>, so a FAULTED compute
+ * encoder can be shown with what it ran on: pipeline, dimensions, every root
+ * parameter and the first descriptors of each table, resolved to the resource
+ * they point into (and flagged when the range runs past its end). */
+#define MAD_FREC_N 64
+#define MAD_FREC_P 12
+#define MAD_FREC_D 6
+struct mad_frec {
+    unsigned seq; struct mad_device *d; const void *pso; char name[64]; UINT backend;
+    UINT kind, x, y, z; UINT64 ind_va; UINT nparam, tg[3];
+    struct { UINT type, reg, space, ndesc; UINT64 va; UINT32 c[4]; struct mad_descriptor de[MAD_FREC_D]; } p[MAD_FREC_P];
+};
+static struct mad_frec g_frec[MAD_FREC_N];
+static volatile LONG g_frec_pos;
+static void mad_fault_record_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
+    struct mad_frec *r = &g_frec[(InterlockedIncrement(&g_frec_pos) - 1) % MAD_FREC_N];
+    const struct mad_rootsig *rs = e->crs; UINT i;
+    memset(r, 0, sizeof *r);
+    r->seq = e->cenc_seq; r->d = e->q->device; r->pso = e->cpso; r->backend = e->cpso->backend;
+    lstrcpynA(r->name, e->cpso->vs_name, sizeof r->name);
+    r->tg[0] = e->cpso->tg[0]; r->tg[1] = e->cpso->tg[1]; r->tg[2] = e->cpso->tg[2];
+    r->kind = c->kind;
+    if (c->kind == MC_DISPATCH) { r->x = c->u.dispatch.x; r->y = c->u.dispatch.y; r->z = c->u.dispatch.z; }
+    else if (c->u.ind.args) r->ind_va = c->u.ind.args->gpu_address + c->u.ind.off;
+    if (!rs) return;
+    for (i = 0; i < rs->nparams && i < MAD_FREC_P && i < MAD_ROOT_PARAM_MAX; i++) {
+        const struct madeira_ir_root_param *pp = &rs->params[i];
+        r->p[i].type = pp->type; r->p[i].reg = pp->shader_register; r->p[i].space = pp->register_space;
+        r->p[i].va = e->croot[i];
+        if (pp->type == MADEIRA_IR_PARAM_CONSTANTS) memcpy(r->p[i].c, e->cconsts[i], sizeof r->p[i].c);
+        else if (pp->type == MADEIRA_IR_PARAM_TABLE && e->srv && e->srv->cpu && e->croot[i] >= e->srv->gpu_address &&
+                 e->croot[i] < e->srv->gpu_address + (UINT64)e->srv->count * sizeof(struct mad_descriptor)) {
+            UINT idx = (UINT)((e->croot[i] - e->srv->gpu_address) / sizeof(struct mad_descriptor)), k, n = 0;
+            for (k = 0; k < pp->num_ranges && pp->first_range + k < rs->nranges; k++) {
+                UINT nd = rs->ranges[pp->first_range + k].num_descriptors;
+                n += nd > MAD_FREC_D ? MAD_FREC_D : nd;
+            }
+            if (n > MAD_FREC_D) n = MAD_FREC_D;
+            if (idx + n > e->srv->count) n = e->srv->count - idx;
+            memcpy(r->p[i].de, &e->srv->cpu[idx], n * sizeof(struct mad_descriptor));
+            r->p[i].ndesc = n;
+        }
+    }
+    r->nparam = i;
+}
+static void mad_fault_desc_line(struct mad_device *d, const char *pfx, UINT64 va, UINT64 len) {
+    UINT64 off = 0; struct mad_resource *res = va ? mad_resolve_address(d, va, &off) : NULL;
+    if (!va) { d3d12_log("[madeira-d3d12]     %s NULL address\n", pfx); return; }
+    if (!res) { d3d12_log("[madeira-d3d12]     %s va=%llx len=%llu -> NO live resource\n", pfx, (unsigned long long)va, (unsigned long long)len); return; }
+    d3d12_log("[madeira-d3d12]     %s va=%llx len=%llu -> '%s' %llu bytes +%llu%s\n", pfx, (unsigned long long)va, (unsigned long long)len,
+              res->name ? res->name : "?", (unsigned long long)res->size, (unsigned long long)off,
+              len && off + len > res->size ? "  <== RUNS PAST THE END" : "");
+}
+static void mad_fault_dump_dispatch(unsigned seq) {
+    LONG end = g_frec_pos, i; unsigned shown = 0;
+    static const char *pt[5] = { "table", "constants", "CBV", "SRV", "UAV" };
+    for (i = end - 1; i >= 0 && end - i <= MAD_FREC_N && shown < 3; i--) {
+        const struct mad_frec *r = &g_frec[i % MAD_FREC_N]; UINT k, j;
+        if (r->seq != seq || !r->d) continue;
+        shown++;
+        if (r->kind == MC_DISPATCH)
+            d3d12_log("[madeira-d3d12] GPU fault dispatch C#%u: pso %p '%s' backend %u tg %ux%ux%u, Dispatch(%u, %u, %u) (C:\\madeira-cs\\cs_%p_*.dxil if dumped)\n",
+                      seq, r->pso, r->name, r->backend, r->tg[0], r->tg[1], r->tg[2], r->x, r->y, r->z, r->pso);
+        else {
+            d3d12_log("[madeira-d3d12] GPU fault dispatch C#%u: pso %p '%s' backend %u tg %ux%ux%u, indirect args at %llx\n",
+                      seq, r->pso, r->name, r->backend, r->tg[0], r->tg[1], r->tg[2], (unsigned long long)r->ind_va);
+            mad_fault_desc_line(r->d, "indirect args", r->ind_va, 12);
+        }
+        for (k = 0; k < r->nparam; k++) {
+            char pfx[64];
+            d3d12_log("[madeira-d3d12]   p%u %s reg %u space %u va=%llx%s\n", k, r->p[k].type < 5 ? pt[r->p[k].type] : "?",
+                      r->p[k].reg, r->p[k].space, (unsigned long long)r->p[k].va,
+                      r->p[k].type == MADEIRA_IR_PARAM_TABLE && r->p[k].va && !r->p[k].ndesc ? " (not in the shader-visible heap)" : "");
+            if (r->p[k].type == MADEIRA_IR_PARAM_CONSTANTS)
+                d3d12_log("[madeira-d3d12]     constants %#x %#x %#x %#x\n", r->p[k].c[0], r->p[k].c[1], r->p[k].c[2], r->p[k].c[3]);
+            else if (r->p[k].type != MADEIRA_IR_PARAM_TABLE) {
+                snprintf(pfx, sizeof pfx, "root %s", pt[r->p[k].type]);
+                mad_fault_desc_line(r->d, pfx, r->p[k].va, 0);
+            }
+            for (j = 0; j < r->p[k].ndesc; j++) {
+                const struct mad_descriptor *de = &r->p[k].de[j];
+                snprintf(pfx, sizeof pfx, "[%u] view=%llx meta=%llx", j, (unsigned long long)de->texture_view_id, (unsigned long long)de->metadata);
+                if (de->gpu_va) mad_fault_desc_line(r->d, pfx, de->gpu_va, de->metadata & 0xffffffffull);
+                else d3d12_log("[madeira-d3d12]     %s (texture or null)\n", pfx);
+            }
+        }
+    }
+    if (!shown) d3d12_log("[madeira-d3d12] GPU fault dispatch C#%u: no recorded dispatch (first fault, or ring overrun)\n", seq);
+}
 static void mad_fault_report(obj_handle_t cb) {
     static LONG said;
     struct { UINT64 cb, buf, size; } t;
@@ -2254,6 +2345,7 @@ static void mad_fault_report(obj_handle_t cb) {
                 char *end = strstr(f, "; ");
                 if (!end) end = f + strlen(f);
                 mad_fault_parse(f, end);
+                if (!strncmp(f + 10, "C#", 2)) mad_fault_dump_dispatch((unsigned)strtoul(f + 12, NULL, 10));
                 f = end;
             }
     }
@@ -4347,13 +4439,14 @@ static void exec_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
         if (e->renc) InterlockedIncrement(&g_pass_end_dispatch);
         exec_end(e);
         e->cenc = MTLCommandBuffer_computeCommandEncoder(e->cb, false); if (e->cenc) g_enc_seq++;
-        e->cenc_pso = e->cpso;
+        e->cenc_pso = e->cpso; e->cenc_seq = g_enc_seq;
         if (g_fault_diag) mad_label(e->cenc, "C#%u %s fn=%llx:%s", g_enc_seq, e->cpso->vs_name,
                                     (unsigned long long)e->cpso->vs_fn, e->cpso->vs_name);
         else if (g_enc_labels) mad_label(e->cenc, "C#%u %s", g_enc_seq, e->cpso->vs_name);   /* ml1142 */
         if (!e->cenc) { d3d12_log("[madeira-d3d12] no compute encoder\n"); MAD_SKIP(e); return; }
         exec_fence_compute(e, e->cenc, 0);   /* ml1091 */
     }
+    if (g_fault_diag) mad_fault_record_dispatch(e, c);   /* madeira-bcd */
     /* ml1008: a pipeline built by the DXBC backend reads two argument buffers of
      * its own at fixed Metal indices, not the converter's top-level layout.
      * Build those instead; a range that cannot be resolved fails the dispatch

@@ -183,6 +183,11 @@ already did.
   first gameplay frames, Metal then ignored the queue and the game stopped
   itself, and the error named no shader. `gpu-fault-info = 0` /
   `gpu-fault-skip = 0` in madeira.cfg turn it off / keep such pipelines.
+  From the first fault on, every dispatch's bindings are also copied into a
+  ring keyed by its encoder, and a faulted compute encoder is logged with its
+  pipeline, dimensions, root parameters and the first descriptors of each
+  table resolved to the resources they point into (`GPU fault dispatch C#...`,
+  `RUNS PAST THE END`); op 9 prefixes the Metal error code.
 - UAV counters for DXBC shaders (`mad_uavctr_*`): `CreateUnorderedAccessView`'s
   counter resource was ignored and the sm5 table's counter word was 0, so a
   shader appending to a buffer wrote through a null pointer (a GPU page fault;
