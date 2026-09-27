@@ -18,8 +18,8 @@
 //    own buttons do. Every launch path in the old panel still exists, reachable
 //    as "Developer tools".
 //
-//  Targets iOS 26+, so it uses Liquid Glass for the floating controls (chips,
-//  badges, play buttons) and leaves the box art and cards opaque -- glass is
+//  Uses Liquid Glass on iOS 26+ and material on earlier iOS versions for the
+//  floating controls (chips, badges, play buttons); box art and cards remain opaque -- glass is
 //  for things that sit on top of content, and the covers are the content.
 //
 
@@ -116,6 +116,28 @@ struct LaunchRequest {
     /// x86-64 program drawing through the native D3D12 runtime, its shaders
     /// converted at pipeline creation by the Metal Shader Converter.
     static let x64D3D12Cube = LaunchRequest(title: "x64 DX12 Cube", exe: "d3d12-cube-x64.exe", args: nil, desktop: nil)
+}
+
+private extension View {
+    @ViewBuilder func homeGlassCircle() -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(.regular.interactive(), in: Circle())
+        } else {
+            self.background(.ultraThinMaterial, in: Circle())
+        }
+    }
+
+    @ViewBuilder func homeGlassCapsule(tint: Color? = nil) -> some View {
+        if #available(iOS 26.0, *) {
+            if let tint {
+                self.glassEffect(.regular.tint(tint.opacity(0.25)), in: Capsule())
+            } else {
+                self.glassEffect(.regular, in: Capsule())
+            }
+        } else {
+            self.background(.ultraThinMaterial, in: Capsule())
+        }
+    }
 }
 
 // MARK: - Experimental settings
@@ -541,7 +563,7 @@ struct HomeView: View {
                     .font(.title3)
                     .foregroundStyle(.white)
                     .frame(width: 40, height: 40)
-                    .glassEffect(.regular.interactive(), in: Circle())
+                    .homeGlassCircle()
             }
         }
         .padding(14)
@@ -740,7 +762,7 @@ private struct StatusChip: View {
         .foregroundStyle(tint)
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
-        .glassEffect(.regular.tint(tint.opacity(0.25)), in: Capsule())
+        .homeGlassCapsule(tint: tint)
     }
 }
 
@@ -763,7 +785,7 @@ private struct PlayGlyph: View {
             .font(.system(size: 16, weight: .bold))
             .foregroundStyle(.white)
             .frame(width: 40, height: 40)
-            .glassEffect(.regular.interactive(), in: Circle())
+            .homeGlassCircle()
     }
 }
 
@@ -828,7 +850,7 @@ private struct GameCard: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
-                        .glassEffect(.regular, in: Capsule())
+                        .homeGlassCapsule()
                         .padding(8)
                 }
             }
