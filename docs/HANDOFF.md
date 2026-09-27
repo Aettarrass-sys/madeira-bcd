@@ -205,6 +205,35 @@ crash handler; its own faults are secondary. Next action is a true fastsync-off
 run. If the same freed-while-read signature remains with `mode=off`, collect
 the freeing and reading guest call stacks as proposed above.
 
+### Build 185 valid fastsync-off test (2026-09-27 18:29, log `GhostOfTsushima.exe-2026-09-27_18-29-58.txt`)
+The owner enabled the switch and got about **3–5 more seconds of gameplay**
+before another crash (one run, so this is not established as an improvement).
+Log line 273 says `[fastsync] ... mode=off (pre-ml952) peek=off`; all reported
+`[perf]` fastsync hit/miss/peek counters remain zero. Thus fastsync was really
+disabled, and disabling it alone did **not** prevent this crash. Do not
+continue to treat the fastsync fast path as the sole cause.
+
+At lines 36966–37076, the source address `0x70f0dd0040` belongs to a
+`0x70f0dd0000+0x210000` Wine view created by tid `0024` about 8.6 s earlier
+and **deleted by tid `00f8` 7–8 ms before the faults**. Threads `00ec`,
+`00f0` and `0024` fault on reads from that source during 2 MB copies in
+`ntdll.dll+0x64074` (different destinations). There was no new Metal command
+buffer failure; the later `crs-handler.exe` faults are secondary. The log
+proves a freed-while-read overlap, but does not yet prove whether the early
+free is a game scheduling error, a different Madeira wait/signal problem,
+or some other translation/VM behavior.
+
+**Next diagnostic change (after this result):** `virtual_ios.c` captures the
+release site on `NtFreeVirtualMemory(MEM_RELEASE)` for 1 MB+ guest-band views
+and attaches it to the existing deletion-history record. On the next fault,
+`[free-origin]` prints the native return address, FEX live and saved x64 RIP,
+saved x64 RSP, and up to eight candidate return addresses within the main
+exe (with RVAs) scanned from the saved guest stack. These are candidates,
+not a verified unwind; compare them with the reader's existing `[callret]`
+trace. The data prints only when a later fault overlaps the freed view.
+Build and test this instrumented revision next; then identify the releasing
+call site before changing scheduling or memory-lifetime semantics.
+
 **About the Metal HUD suggestion "adopt MTL4Compiler"**: Metal 4
 (iOS/macOS 26+) has `MTL4Compiler` (explicit compiler objects, async
 compilation with QoS, `MTL4Archive`, flexible render pipeline states that

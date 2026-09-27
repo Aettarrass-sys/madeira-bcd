@@ -158,6 +158,10 @@ already did.
   `LaunchRequest.safeSync`): sets `MADEIRA_FASTSYNC=0` for that launch, to test
   whether Madeira's in-process event/wait fast path lets a wait return early
   (Ghost of Tsushima's workers free a 1 MB block another thread still reads).
+  The valid build 185 test at 2026-09-27 18:29 showed `mode=off`, zero
+  fastsync counters, and nevertheless another freed-while-read crash. The
+  fast path alone cannot explain the failure; the reported 3–5 extra seconds
+  of gameplay is a single observation, not proof of a speed/stability gain.
 - Parallel first use of lazy pipelines (`mad_prebuild_lists`): each pipeline
   has its own build lock (was one global lock), and before a batch is replayed
   the not-yet-built pipelines its lists bind are built on up to 4 threads.
@@ -240,6 +244,17 @@ already did.
   An exited thread's native stack is decommitted but kept reserved for the
   next 8 stack frees before release; if it was freed or replaced meanwhile the
   release is skipped and `[stack-quarantine] ... FREED OR REPLACED` is logged.
+- Free-site diagnostics (`virtual_ios.c`, `ios_vh_capture_free_site`): in the
+  build 185 fastsync-off log, tid `00f8` deleted a `0x210000` view at
+  `0x70f0dd0000`; 7–8 ms later three threads read `base+0x40` while copying
+  2 MB via ntdll, with no new GPU command-buffer failure. For full
+  `NtFreeVirtualMemory(MEM_RELEASE)` deletions of guest-band views >=1 MB,
+  snapshot the native return address, FEX state RIP, saved AMD64 context RIP
+  and RSP, plus up to eight main-exe address candidates from the saved stack.
+  The existing view-history ring carries the snapshot and prints it only if a
+  future fault covers that view (`[free-origin]`, addresses and exe-relative
+  RVAs). Stack scanning is not an unwind; EC contexts can be stale, so the
+  candidates need comparison with the reader's fault-time `[callret]` trace.
 - Texture UAV clears (`mad_record_uav_tex_clear`, `MC_FILL_TEX`):
   `ClearUnorderedAccessViewUint/Float` on a texture view used to be skipped.
   The view's mip, slices and format are remembered by view id at

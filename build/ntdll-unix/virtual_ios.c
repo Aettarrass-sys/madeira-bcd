@@ -12361,16 +12361,84 @@ static void ios_jit_retire_image( void *base, size_t size )
  * band view of 1 MB or more is recorded here when it is created and when it is
  * deleted (thread, time, why), and a fault on an address Wine does not own
  * prints the records that covered it (ios_dump_fault_region). Passive. */
-struct ios_vh_rec { char *base; size_t size; unsigned int protect; unsigned int tid; unsigned int ms; char kind; const char *why; };
+/* A release site is captured at NtFreeVirtualMemory, before free_pages enters
+ * delete_view.  A native return address alone usually names an ARM64EC thunk,
+ * so also retain FEX's saved x64 context and return-address candidates from
+ * its stack.  Nothing is unwound or printed on the hot free path. */
+struct ios_vh_site
+{
+    void *native_return;
+    uint64_t state_rip, ctx_rip, ctx_rsp, image_base;
+    uint64_t image_returns[8];
+    unsigned int nr_returns, valid;
+    char *base;
+};
+struct ios_vh_rec
+{
+    char *base;
+    size_t size;
+    unsigned int protect, tid, ms;
+    char kind;
+    const char *why;
+    struct ios_vh_site site;
+};
 #define IOS_VH_N 4096
 static struct ios_vh_rec ios_vh_ring[IOS_VH_N];
 static unsigned long ios_vh_pos;
 static __thread const char *ios_vh_why;
+static __thread struct ios_vh_site ios_vh_free_site;
 static unsigned int ios_vh_ms( void )
 {
     struct timespec ts;
     clock_gettime( CLOCK_MONOTONIC, &ts );
     return (unsigned int)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+static void ios_vh_capture_free_site( const struct file_view *view, void *native_return )
+{
+    TEB *teb = NtCurrentTeb();
+    struct ios_vh_site *site = &ios_vh_free_site;
+    void *area;
+    uintptr_t rsp, low, high, image_lo = 0, image_hi = 0;
+    unsigned int i;
+
+    site->valid = 0;
+    if (view->size < (1u << 20) || (uintptr_t)view->base < 0x7000000000ULL ||
+        (uintptr_t)view->base >= 0x7c00000000ULL || !teb) return;
+    site->base = view->base;
+    site->native_return = native_return;
+    site->state_rip = ios_guest_rip_now();
+    site->ctx_rip = ios_guest_ctx_rip();
+    site->ctx_rsp = site->image_base = 0;
+    site->nr_returns = 0;
+    area = teb->ChpeV2CpuAreaInfo;
+    if (area) site->ctx_rsp = *(uint64_t *)((char *)area + 0x50 + 0x98);
+
+    /* Bound the scan to this thread's stack and 128 slots from saved RSP.
+     * These are candidates, not a real unwind; saved EC context can be stale. */
+    rsp = (uintptr_t)site->ctx_rsp;
+    low = (uintptr_t)teb->Tib.StackLimit;
+    high = (uintptr_t)teb->Tib.StackBase;
+    if (teb->Peb && teb->Peb->ImageBaseAddress)
+    {
+        struct file_view *image = find_view( teb->Peb->ImageBaseAddress, 0 );
+        if (image && (image->protect & SEC_IMAGE))
+        {
+            image_lo = (uintptr_t)image->base;
+            image_hi = image_lo + image->size;
+            site->image_base = image_lo;
+        }
+    }
+    if (image_lo && rsp >= low && rsp < high && !(rsp & 7))
+    {
+        for (i = 0; i < 128 && high - rsp >= (i + 1) * sizeof(uint64_t) &&
+                    site->nr_returns < ARRAY_SIZE(site->image_returns); i++)
+        {
+            uint64_t candidate = ((const uint64_t *)rsp)[i];
+            if (candidate >= image_lo && candidate < image_hi)
+                site->image_returns[site->nr_returns++] = candidate;
+        }
+    }
+    site->valid = 1;
 }
 static void ios_vh_note( char kind, const struct file_view *view )
 {
@@ -12381,6 +12449,8 @@ static void ios_vh_note( char kind, const struct file_view *view )
     r->tid = NtCurrentTeb() ? (unsigned int)(ULONG_PTR)NtCurrentTeb()->ClientId.UniqueThread : 0;
     r->ms = ios_vh_ms();
     r->why = ios_vh_why;
+    r->site = kind == 'd' && ios_vh_free_site.valid &&
+              ios_vh_free_site.base == view->base ? ios_vh_free_site : (struct ios_vh_site){0};
 }
 static void ios_vh_dump( const void *addr )
 {
@@ -12393,6 +12463,19 @@ static void ios_vh_dump( const void *addr )
         dprintf( 2, "[fault-rgn]   history: view %p+0x%lx protect=0x%x %s by tid %04x %u ms ago%s%s\n",
                  r->base, (unsigned long)r->size, r->protect, r->kind == 'c' ? "CREATED" : "DELETED",
                  r->tid, now - r->ms, r->why ? " -- " : "", r->why ? r->why : "" );
+        if (r->site.valid)
+        {
+            unsigned int j;
+            dprintf( 2, "[free-origin] view=%p native-return=%p state-rip=%#llx ec-ctx-rip=%#llx "
+                     "ec-ctx-rsp=%#llx main-image=%#llx candidates=%u (stack scan, not unwind)\n",
+                     r->base, r->site.native_return, (unsigned long long)r->site.state_rip,
+                     (unsigned long long)r->site.ctx_rip, (unsigned long long)r->site.ctx_rsp,
+                     (unsigned long long)r->site.image_base, r->site.nr_returns );
+            for (j = 0; j < r->site.nr_returns; j++)
+                dprintf( 2, "[free-origin]   candidate[%u]=%#llx exe+rva=%#llx\n", j,
+                         (unsigned long long)r->site.image_returns[j],
+                         (unsigned long long)(r->site.image_returns[j] - r->site.image_base) );
+        }
         n++;
     }
     if (!n) dprintf( 2, "[fault-rgn]   history: no view of 1 MB+ covered this address in the last %u records\n", IOS_VH_N );
@@ -25068,7 +25151,10 @@ NTSTATUS WINAPI NtFreeVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T *si
         break;
     case MEM_RELEASE:
         if (!size) size = view->size;
+        if (base == view->base && size == view->size)
+            ios_vh_capture_free_site( view, __builtin_return_address(0) );
         status = free_pages( view, base, size );
+        ios_vh_free_site.valid = 0;
         break;
     case MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER:
         status = free_pages_preserve_placeholder( view, base, size );
