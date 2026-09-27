@@ -618,6 +618,7 @@ struct mad_pso {
     obj_handle_t device_handle;
     int lazy;   /* madeira-bcd: plain render pipeline built at its first draw (mad_pso_realize) */
     int lazy_cs;   /* madeira-bcd: compute pipeline built at its first dispatch */
+    UINT64 cs_hash; UINT cs_len;   /* madeira-bcd: FNV-1a of the CS bytecode, for GPU fault reports */
     char vs_name[64], ps_name[64];                  /* ml879: for the draw dump */
     char blend[400];                                /* ml1106/ml1107: every RT's blend state for the draw dump */
     UINT root_off[MAD_ROOT_PARAM_MAX]; int has_root_off; /* ml882: offsets from the converter's reflection */
@@ -2236,21 +2237,78 @@ static void mad_fault_parse(const char *entry, const char *end) {
  * encoder can be shown with what it ran on: pipeline, dimensions, every root
  * parameter and the first descriptors of each table, resolved to the resource
  * they point into (and flagged when the range runs past its end). */
-#define MAD_FREC_N 64
+#define MAD_FREC_N 1024
 #define MAD_FREC_P 12
 #define MAD_FREC_D 6
 struct mad_frec {
-    unsigned seq; struct mad_device *d; const void *pso; char name[64]; UINT backend;
+    unsigned seq; struct mad_device *d; const void *pso; char name[64]; UINT backend; UINT64 cs_hash; UINT cs_len;
     UINT kind, x, y, z; UINT64 ind_va; UINT nparam, tg[3];
     struct { UINT type, reg, space, ndesc; UINT64 va; UINT32 c[4]; struct mad_descriptor de[MAD_FREC_D]; } p[MAD_FREC_P];
 };
 static struct mad_frec g_frec[MAD_FREC_N];
+/* madeira-bcd: a compute shader that faulted the GPU is remembered in
+ * C:\madeira-cs\fault-shaders.txt; at the next launch its bytecode is written
+ * next to it and into the log (base64), so it can be disassembled offline. */
+static UINT64 g_fault_cs_want[16]; static UINT g_fault_cs_nwant; static LONG g_fault_cs_loaded;
+static void mad_fault_remember_cs(UINT64 hash, UINT len) {
+    HANDLE h; DWORD wr; char line[64]; int n;
+    if (!hash) return;
+    CreateDirectoryA("C:\\madeira-cs", NULL);
+    h = CreateFileA("C:\\madeira-cs\\fault-shaders.txt", FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    n = snprintf(line, sizeof line, "%016llx %u\r\n", (unsigned long long)hash, len);
+    WriteFile(h, line, (DWORD)n, &wr, NULL);
+    CloseHandle(h);
+}
+static void mad_fault_cs_load(void) {
+    char buf[2048]; DWORD rd = 0; HANDLE h; char *q;
+    if (InterlockedExchange(&g_fault_cs_loaded, 1)) return;
+    h = CreateFileA("C:\\madeira-cs\\fault-shaders.txt", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    ReadFile(h, buf, sizeof buf - 1, &rd, NULL); CloseHandle(h);
+    buf[rd] = 0;
+    for (q = buf; *q && g_fault_cs_nwant < 16; ) {
+        UINT64 v = strtoull(q, &q, 16);
+        if (v) g_fault_cs_want[g_fault_cs_nwant++] = v;
+        while (*q && *q != '\n') q++;
+        if (*q) q++;
+    }
+    if (g_fault_cs_nwant) d3d12_log("[madeira-d3d12] GPU fault: %u compute shader(s) from earlier runs will be logged when created\n", g_fault_cs_nwant);
+}
+static void mad_fault_cs_check(const void *bc, UINT len, UINT64 hash) {
+    static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    UINT i, k; char name[96], line[720]; const unsigned char *p = bc; HANDLE h; DWORD wr;
+    mad_fault_cs_load();
+    for (i = 0; i < g_fault_cs_nwant; i++) if (g_fault_cs_want[i] == hash) break;
+    if (i == g_fault_cs_nwant) return;
+    g_fault_cs_want[i] = 0;   /* once */
+    snprintf(name, sizeof name, "C:\\madeira-cs\\fault_%016llx.dxil", (unsigned long long)hash);
+    h = CreateFileA(name, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) { WriteFile(h, bc, len, &wr, NULL); CloseHandle(h); }
+    d3d12_log("[madeira-d3d12] GPU fault shader %016llx: %u bytes follow as base64 (also %s)\n", (unsigned long long)hash, len, name);
+    for (i = 0; i < len; ) {
+        UINT n = 0;
+        for (k = 0; k < 175 && i < len; k++) {   /* 525 bytes -> 700 chars per line */
+            UINT32 v = (UINT32)p[i] << 16; UINT got = 1;
+            if (i + 1 < len) { v |= (UINT32)p[i + 1] << 8; got++; }
+            if (i + 2 < len) { v |= p[i + 2]; got++; }
+            line[n++] = b64[(v >> 18) & 63]; line[n++] = b64[(v >> 12) & 63];
+            line[n++] = got > 1 ? b64[(v >> 6) & 63] : '=';
+            line[n++] = got > 2 ? b64[v & 63] : '=';
+            i += got;
+        }
+        line[n] = 0;
+        d3d12_log("[b64 %016llx] %s\n", (unsigned long long)hash, line);
+    }
+    d3d12_log("[madeira-d3d12] GPU fault shader %016llx: end of bytecode\n", (unsigned long long)hash);
+}
 static volatile LONG g_frec_pos;
 static void mad_fault_record_dispatch(struct mad_exec *e, const struct mad_cmd *c) {
     struct mad_frec *r = &g_frec[(InterlockedIncrement(&g_frec_pos) - 1) % MAD_FREC_N];
     const struct mad_rootsig *rs = e->crs; UINT i;
     memset(r, 0, sizeof *r);
     r->seq = e->cenc_seq; r->d = e->q->device; r->pso = e->cpso; r->backend = e->cpso->backend;
+    r->cs_hash = e->cpso->cs_hash; r->cs_len = e->cpso->cs_len;
     lstrcpynA(r->name, e->cpso->vs_name, sizeof r->name);
     r->tg[0] = e->cpso->tg[0]; r->tg[1] = e->cpso->tg[1]; r->tg[2] = e->cpso->tg[2];
     r->kind = c->kind;
@@ -2292,6 +2350,9 @@ static void mad_fault_dump_dispatch(unsigned seq) {
         const struct mad_frec *r = &g_frec[i % MAD_FREC_N]; UINT k, j;
         if (r->seq != seq || !r->d) continue;
         shown++;
+        if (shown == 1) mad_fault_remember_cs(r->cs_hash, r->cs_len);
+        d3d12_log("[madeira-d3d12] GPU fault dispatch C#%u: CS bytecode %u bytes, hash %016llx (its bytecode is logged at the next launch)\n",
+                  seq, r->cs_len, (unsigned long long)r->cs_hash);
         if (r->kind == MC_DISPATCH)
             d3d12_log("[madeira-d3d12] GPU fault dispatch C#%u: pso %p '%s' backend %u tg %ux%ux%u, Dispatch(%u, %u, %u) (C:\\madeira-cs\\cs_%p_*.dxil if dumped)\n",
                       seq, r->pso, r->name, r->backend, r->tg[0], r->tg[1], r->tg[2], r->x, r->y, r->z, r->pso);
@@ -9858,6 +9919,12 @@ static HRESULT STDMETHODCALLTYPE device_CreateComputePipelineState(ID3D12Device 
     if (!p) return E_OUTOFMEMORY;
     p->vtbl = &g_pso_vtbl; p->refs = 1; p->iid = &IID_ID3D12PipelineState; p->name = "ComputePipelineState";
     p->is_compute = 1;
+    {   /* madeira-bcd: identify the bytecode for GPU fault reports */
+        const unsigned char *b = desc->CS.pShaderBytecode; UINT64 hh = 0xcbf29ce484222325ull; SIZE_T q;
+        for (q = 0; q < desc->CS.BytecodeLength; q++) { hh ^= b[q]; hh *= 0x100000001b3ull; }
+        p->cs_hash = hh; p->cs_len = (UINT)desc->CS.BytecodeLength;
+        if (mad_fault_info_on()) mad_fault_cs_check(b, p->cs_len, hh);
+    }
     {
         struct madeira_ir_loc locs[MAD_LOC_MAX]; unsigned nl = 0;
         struct mad_air_out air;
