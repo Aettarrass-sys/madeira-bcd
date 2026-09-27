@@ -8475,7 +8475,7 @@ struct mad_sc_hdr {
 static int g_sc_on = -1;
 static WCHAR g_sc_root[MAX_PATH], g_sc_build[64], g_sc_dir[MAX_PATH];
 static volatile LONG g_sc_hit, g_sc_miss, g_sc_store;
-static const char g_sc_stamp[] = "madeira_d3d12 " __DATE__ " " __TIME__;
+static const char g_sc_stamp[] = "madeira_d3d12 bc1 " __DATE__ " " __TIME__;   /* bc1: converted with IRCompatibilityFlagBoundsCheck */
 
 struct mad_sc_hash { UINT64 a, b; };
 static void mad_sc_feed(struct mad_sc_hash *h, const void *p, SIZE_T n) {

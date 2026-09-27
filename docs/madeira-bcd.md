@@ -171,6 +171,16 @@ already did.
   stopped itself after a failed allocation at 7.9 GB. A tessellation pipeline
   the runtime cannot build is now a placeholder (draws skipped) rather than
   E_FAIL, as ml1138 already did for geometry shaders.
+- Robust buffer access for converted shaders (`madeira_ir_unix.mm`):
+  `IRCompatibilityFlagBoundsCheck` is now set with
+  `IRCompatibilityFlagForceTextureArray`, so a DXIL shader's out-of-range
+  buffer read returns 0 and an out-of-range write is dropped, as D3D12
+  requires. Ghost of Tsushima's GPU hang was a normal-recompute kernel
+  dispatched with its thread count rounded up to the group size: the extra
+  threads read their adjacency range from past the end of a structured buffer,
+  got garbage instead of 0,0 and looped until Metal timed the command buffer
+  out (error 2) -- found by capturing the kernel's DXIL (below) and reading it.
+  `MADEIRA_IR_NO_BOUNDS_CHECK=1` restores the old conversion.
 - GPU fault attribution (`mad_fault_*`, `tools/patch-dxmt-gpu-fault-info.py`):
   batch command buffers are created with
   `MTLCommandBufferErrorOptionEncoderExecutionStatus` (winemetal

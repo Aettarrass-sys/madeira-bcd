@@ -1286,7 +1286,21 @@ extern "C" int madeira_ir_convert_impl(struct madeira_ir_convert_args *a) {
      * returns zeros on the mismatch. With this flag every 1D/2D/cube texture
      * is an array in the converted shader, and the runtime allocates and
      * views every such texture as an array to match. */
-    g_ir.IRCompilerSetCompatibilityFlags(compiler, IRCompatibilityFlagForceTextureArray);
+    /* madeira-bcd: IRCompatibilityFlagBoundsCheck gives D3D12's robust buffer
+     * access -- an out-of-range read returns 0, an out-of-range write is
+     * dropped. Without it a read past a buffer returns whatever memory follows.
+     * Ghost of Tsushima dispatches a normal-recompute kernel with its thread
+     * count rounded up to the group size (Dispatch(221) x 64); the threads past
+     * the last vertex read their [first, last) adjacency range from beyond the
+     * buffer, got garbage instead of 0,0, and looped until the GPU timed out
+     * (MTLCommandBufferError 2) in every run. MADEIRA_IR_NO_BOUNDS_CHECK=1
+     * restores the old conversion. */
+    {
+        static int no_bc = -1;
+        if (no_bc < 0) { const char *v = getenv("MADEIRA_IR_NO_BOUNDS_CHECK"); no_bc = v && v[0] == '1'; }
+        g_ir.IRCompilerSetCompatibilityFlags(compiler, (IRCompatibilityFlags)(IRCompatibilityFlagForceTextureArray |
+                                             (no_bc ? 0 : IRCompatibilityFlagBoundsCheck)));
+    }
     a->ret_len2 = 0; a->ret_vs_output_size = 0; a->ret_gs_max_prims = 0; a->ret_gs_payload = 0; a->ret_gs_passthrough = 0;
     if (a->gs_emulation) {   /* ml927 */
         IRInputTopology topo = IRInputTopologyTriangle;
