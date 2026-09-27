@@ -467,6 +467,19 @@ jobs:
           path: toolchains/llvm-mingw-20260421-ucrt-macos-universal
           key: llvm-mingw-20260421-ucrt-macos-universal
 
+      # The tracked 32-bit CPU DLL still contains native Windows TLS. Wine's
+      # WoW64 startup has no TEB TLS array yet, so every x86 program crashes
+      # at libwow64fex.dll+0x1b6ac8 before reaching its own entry point.
+      - name: Require llvm-mingw for the 32-bit CPU module
+        shell: bash
+        run: |
+          test "$MINGW_OK" = 1
+          test -x toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin/aarch64-w64-mingw32-clang++
+
+      - name: Rebuild 32-bit xtajit.dll without native TLS
+        shell: bash
+        run: bash tools/build-xtajit-wow64.sh
+
       # The Xcode project links 7 archives out of FEX/build-ios/ -- FEXCore,
       # FEXCore_Base, JemallocLibs plus the External deps. Nothing built them
       # before, so archiving could never have linked.
@@ -1223,6 +1236,11 @@ jobs:
           app=build-out/Payload/Madeira.app
           bundle_id=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")
           test "$bundle_id" = com.willfaust.mythicemu
+          test -s "$app/aarch64-windows/xtajit.dll"
+          cmp app/Madeira/aarch64-windows/xtajit.dll "$app/aarch64-windows/xtajit.dll" || {
+            echo "::error::the IPA would not contain the rebuilt 32-bit CPU module"
+            exit 1
+          }
           # Sign nested Mach-O code first, then seal the enclosing app with
           # the entitlements SideStore should receive as its signing input.
           if [ -f "$app/Madeira.debug.dylib" ]; then
