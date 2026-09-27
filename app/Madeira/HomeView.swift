@@ -138,6 +138,14 @@ private extension View {
             self.background(.ultraThinMaterial, in: Capsule())
         }
     }
+
+    @ViewBuilder func homeProminentButton() -> some View {
+        if #available(iOS 26.0, *) {
+            self.buttonStyle(.glassProminent)
+        } else {
+            self.buttonStyle(.borderedProminent)
+        }
+    }
 }
 
 // MARK: - Experimental settings
@@ -475,7 +483,17 @@ struct HomeView: View {
     // MARK: Sections
 
     private var statusRow: some View {
-        GlassEffectContainer(spacing: 8) {
+        Group {
+            if #available(iOS 26.0, *) {
+                GlassEffectContainer(spacing: 8) { statusChips }
+            } else {
+                statusChips
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    private var statusChips: some View {
         HStack(spacing: 8) {
             StatusChip(icon: "bolt.fill", text: jitOn ? "JIT on" : "JIT off", tint: jitOn ? .green : .orange)
             if controllers.connectedControllersCount > 0 {
@@ -485,8 +503,6 @@ struct HomeView: View {
             StatusChip(icon: "square.stack.3d.up.fill", text: "\(games.count) games", tint: .blue)
             Spacer()
         }
-        }
-        .padding(.top, 4)
     }
 
     private var jitBanner: some View {
@@ -615,7 +631,7 @@ struct HomeView: View {
                 Button { FilesApp.openDriveC() } label: {
                     Label("Open C:\\ in Files", systemImage: "folder")
                 }
-                .buttonStyle(.glassProminent)
+                .homeProminentButton()
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)

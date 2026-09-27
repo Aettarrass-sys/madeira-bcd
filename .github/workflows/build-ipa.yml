@@ -1240,24 +1240,29 @@ jobs:
         if: failure()
         shell: bash
         run: |
+          # This step reports the original failure; it must not fail itself.
+          if [ -f archive.log ]; then
+            grep -E "^[^ ].*: (error|fatal error):|Undefined symbol|^ld: |symbol\(s\) not found" \
+              archive.log | head -30 || true
+          fi
           for L in ntdll wineserver win32u; do
             if [ -f "$L.log" ]; then
-              T=$(grep -E "^(Results:|Failed:|ERROR)" "$L.log" | head -5 | python3 -c "import sys; print('%0A'.join(sys.stdin.read().splitlines()))")
-              echo "::error::$L.log summary :: $T"
+              T=$(grep -E "^(Failed:|ERROR)" "$L.log" | head -5 | python3 -c "import sys; print('%0A'.join(sys.stdin.read().splitlines()))" || true)
+              if [ -n "$T" ]; then echo "::error::$L.log summary :: $T"; fi
             fi
           done
           N=0
-          for f in $(grep -rl "error:" build --include="*.err" 2>/dev/null | head -4); do
+          for f in $(grep -rl "error:" build --include="*.err" 2>/dev/null | head -4 || true); do
             N=$((N+1))
-            MSG=$(grep -A4 -m3 "error:" "$f" | head -c 1500 | python3 -c "import sys; print('%0A'.join(sys.stdin.read().splitlines()))")
+            MSG=$(grep -A4 -m3 "error:" "$f" | head -c 1500 | python3 -c "import sys; print('%0A'.join(sys.stdin.read().splitlines()))" || true)
             echo "::error::REAL ERROR in $f :: $MSG"
           done
           if [ "$N" -eq 0 ]; then
-            echo "::error::no .err file contains 'error:' -- failure is from a script exit or ar/link stage"
+            echo "No .err file contains 'error:'; check the failing step and archive.log above."
             for L in ntdll wineserver win32u; do
               if [ -f "$L.log" ]; then
                 T=$(tail -n 25 "$L.log" | python3 -c "import sys; print('%0A'.join(sys.stdin.read().splitlines()))")
-                echo "::error::$L.log tail :: $T"
+                echo "$L.log tail :: $T"
               fi
             done
           fi
