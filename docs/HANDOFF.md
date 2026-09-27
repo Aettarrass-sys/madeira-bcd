@@ -382,3 +382,26 @@ Local compile check of `madeira_d3d12` (no device needed): llvm-mingw
 * `app/Madeira/*.swift` — the app (library, per-game settings incl. AVX and
   "Report an NVIDIA GPU").
 * `.github/workflows/build-ipa.yml` — the whole build.
+
+### Build 186 (ChatGPT/Codex) and 187 (Claude), 2026-09-27 evening
+* Build 185 with "Safe thread sync" ON (fastsync `mode=off`) still crashed the
+  same way, so fastsync is NOT the cause (Codex's notes above).
+* Build 186 (Codex) only added free-origin tracing (`[free-origin]` lines
+  under `[fault-rgn] history`). Its device run crashed at ~80 % of "Compiling
+  shaders" with a different signature: Metal's completion handler
+  (`IOGPUMetalCommandBufferStorageDealloc` -> `objc_release`) released a
+  corrupted object (`x0=0x10701`), and a Wine thread crashed in `objc_release`
+  on the same value. Reading: the same freed-while-used race — the game keeps
+  touching a block after it was released, the VA has meanwhile been given to
+  Metal/malloc, and Metal's objects get scribbled on. No `[free-origin]`
+  output in that run (no guest fault on a freed view).
+* **Build 187 (mitigation, not a root-cause fix)**: DELAYED RELEASE in
+  `NtFreeVirtualMemory` (`build/ntdll-unix/virtual_ios.c`, `ios_fd_*`): a
+  whole-view MEM_RELEASE of a private 1-16 MB guest-band allocation returns
+  success at once but the mapping stays committed for `MADEIRA_FREE_DELAY_MS`
+  (default 2000; 0 = off), max 128 MB in flight, then is really released.
+  Late readers find valid memory and nobody else gets that VA meanwhile.
+  Log: `[free-delay] #N release of ... held for 2000 ms`.
+  If GoT gets through gameplay with it, the underlying race (job refcount /
+  wait ordering under FEX) is still worth finding with the free-origin trace
+  (set `MADEIRA_FREE_DELAY_MS=0` in madeira.cfg `env.` to reproduce).

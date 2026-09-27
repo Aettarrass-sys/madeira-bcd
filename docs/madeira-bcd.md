@@ -235,6 +235,12 @@ already did.
   so once that band filled it got STATUS_NO_MEMORY (Ghost of Tsushima: 1 MB,
   then the game stopped itself). The band above the windows is now tried
   before relaxing or failing (`[wow-window] ... placed above them`).
+- Delayed release (`build/ntdll-unix/virtual_ios.c`, `ios_fd_*`): a whole-view
+  MEM_RELEASE of a private 1-16 MB guest-band allocation succeeds at once but
+  stays mapped for `MADEIRA_FREE_DELAY_MS` (default 2000 ms, 0 = off; at most
+  128 MB in flight). Ghost of Tsushima's job workers release a block others
+  are still reading; the freed VA was reused at once (by the game, or by
+  Metal, whose objects then got corrupted). A mitigation, not a fix.
 - View history and stack quarantine (`build/ntdll-unix/virtual_ios.c`,
   `ios_vh_*`, `ios_stack_release`): Ghost of Tsushima's worker threads faulted
   copying 2 MB from a range that had been an exited thread's native stack and
