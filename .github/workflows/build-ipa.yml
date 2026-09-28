@@ -41,6 +41,8 @@ jobs:
           git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-zero-copy-bounds.patch"
           git -C research/dxmt apply --check "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-target-time.patch"
           git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-target-time.patch"
+          git -C research/dxmt apply --check "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-queue-timing.patch"
+          git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-queue-timing.patch"
           git -C research/dxmt diff --check
 
       - name: Require the matching private converter package
@@ -1210,7 +1212,8 @@ jobs:
           "$M/llvm-readobj" --coff-exports "$app/i386-windows/d3d9-emulated.dll" \
             > build-out/archived-d3d9-exports.txt
           grep -q 'Name: madeira_d9_target_time_marker' build-out/archived-d3d9-exports.txt
-          echo "::notice::AppIcon and emulated D3D9 readback timing are in the archived app"
+          grep -a -q 'queue-avg-us=' "$app/i386-windows/d3d9-emulated.dll"
+          echo "::notice::AppIcon and emulated D3D9 queue timing are in the archived app"
 
       # A device run reached DXMT and died there:
       #   err: Failed to create metal view, it seems like your Wine has no
