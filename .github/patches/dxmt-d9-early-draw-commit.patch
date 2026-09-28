@@ -1,0 +1,95 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index a3721ab..f532450 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -1012,6 +1012,7 @@ MTLD3D9Device::commitCurrentChunkTimed(unsigned reason) {
+   m_renamedBytesSinceCommit = 0;
+   m_uploadedBytesSinceCommit = 0;
+   m_batchBytesSinceCommit = 0;
++  m_drawsSinceCommit = 0;
+ }
+ 
+ // Sampler cache lookup. Builds the prefix key from the input info,
+@@ -7812,13 +7813,35 @@ MTLD3D9Device::QueueBatchedDraw(BatchedDraw &&draw) {
+   // points at the slot we're about to occupy in m_pendingDraws.
+   m_pendingOps.push_back({PendingOpRef::Draw, static_cast<uint32_t>(m_pendingDraws.size())});
+   m_pendingDraws.push_back(std::move(draw));
++  // Optional experiment: submit a complete draw batch before a synchronous
++  // readback forces the whole frame through the encode worker. This uses the
++  // same ordered, nonblocking commit path as rename pressure. Disabled by
++  // default; keep a lower bound to avoid a command buffer for every draw.
++  static const size_t early_commit_draws = [] {
++    const std::string value = env::getEnvVar("DXMT_D9_EARLY_COMMIT_DRAWS");
++    const unsigned long long parsed = value.empty() ? 0 : std::strtoull(value.c_str(), nullptr, 10);
++    const size_t threshold = parsed >= 128 && parsed <= 4096 ? static_cast<size_t>(parsed) : 0;
++    Logger::warn(str::format("[d9-early-commit] threshold-draws=", threshold,
++        " (DXMT_D9_EARLY_COMMIT_DRAWS=128..4096; 0 disables)"));
++    return threshold;
++  }();
++  if (early_commit_draws)
++    ++m_drawsSinceCommit;
+   // Submit once the renamed allocations this command buffer pins outgrow the
+   // threshold. A draw is the boundary to do it on: the recording is complete,
+   // and unlike Lock no application-held pointer is outstanding. See
+   // kRenameBytesBeforeImplicitCommit for why an unsubmitted scene is the case
+   // that needs this.
+-  if (m_renamedBytesSinceCommit >= kRenameBytesBeforeImplicitCommit)
++  if (m_renamedBytesSinceCommit >= kRenameBytesBeforeImplicitCommit) {
+     forceFlushAndCommit();
++  } else if (early_commit_draws && m_drawsSinceCommit >= early_commit_draws) {
++    static uint64_t early_commits = 0;
++    if (++early_commits <= 4 || !(early_commits % 256))
++      Logger::warn(str::format("[d9-early-commit] commits=", early_commits,
++          " draws-since-commit=", m_drawsSinceCommit,
++          " pending-draws=", m_pendingDraws.size()));
++    forceFlushAndCommit(0);
++  }
+   // ml1490: managed textures uploaded by the pre-draw sweep are settled here,
+   // on the same boundary.
+   settleUploadPressure();
+@@ -10937,11 +10960,11 @@ MTLD3D9Device::emitCmdbufTailSignal() {
+ }
+ 
+ void
+-MTLD3D9Device::forceFlushAndCommit() {
++MTLD3D9Device::forceFlushAndCommit(unsigned reason) {
+   FlushDrawBatch();
+   flushOpenWork();
+   emitCmdbufTailSignal();
+-  commitCurrentChunkTimed(4);
++  commitCurrentChunkTimed(reason);
+ }
+ 
+ void
+diff --git a/src/d3d9/d3d9_device.hpp b/src/d3d9/d3d9_device.hpp
+index f77f25a..f97c2f0 100644
+--- a/src/d3d9/d3d9_device.hpp
++++ b/src/d3d9/d3d9_device.hpp
+@@ -260,13 +260,14 @@ public:
+   // at tail feeds recycling.
+   void emitCmdbufTailSignal();
+   // Force-commit the current chunk so its cmdbuf actually reaches the
+-  // GPU. Used by the draw queue when minted rename bytes cross the threshold; we
+-  // need the most recently retired backing's signal_seq to be a
++  // GPU. Used by the draw queue for rename pressure and optional early draw
++  // commits. For renames we need the most recently retired backing's signal_seq
++  // to be a
+   // signal the GPU will eventually retire, not a chunk still buffered
+   // on the encode thread. Drains queued draws, drains the legacy sync
+   // path, emits the tail signal, and commits. Pulled out of the
+   // vertex/index buffer Lock helpers so both share one shape.
+-  void forceFlushAndCommit();
++  void forceFlushAndCommit(unsigned reason = 4);
+ 
+   // Bytes of dynamic-buffer allocations minted since the last commit, and the
+   // point at which the next draw submits rather than accumulating further.
+@@ -293,6 +294,9 @@ public:
+   // where the allocation actually fails rather than at it.
+   static constexpr uint64_t kRenameBytesBeforeImplicitCommit = 16ull << 20;
+   uint64_t m_renamedBytesSinceCommit = 0;
++  // Counts across EndScene flushes, which move pending draws to a chunk
++  // without submitting it. The optional early-commit gate must still fire.
++  uint32_t m_drawsSinceCommit = 0;
+ 
+   void
+   noteDynamicRenameBytes(uint64_t bytes) {
