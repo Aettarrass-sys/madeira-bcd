@@ -8069,7 +8069,7 @@ static void ios_exe_win_init( void )
 }
 
 /* Returns 1 if the reservation was released for this request. */
-static int ios_exe_win_claim( const void *addr, size_t size )
+static int ios_exe_win_claim( const void *addr, size_t size, int fixed_image )
 {
     uintptr_t a = (uintptr_t)addr;
 
@@ -8078,7 +8078,7 @@ static int ios_exe_win_claim( const void *addr, size_t size )
      * a released window still has to answer a matching request. */
     if (!ios_exe_win_base) return 0;
     if (a < ios_exe_win_base || a + size > ios_exe_win_base + ios_exe_win_size) return 0;
-    if (size < 64u * 1024u * 1024u)
+    if (size < 64u * 1024u * 1024u && !fixed_image)
     {
         static int small_n;
         if (small_n++ < 8)
@@ -8145,8 +8145,8 @@ static int ios_exe_win_claim( const void *addr, size_t size )
         return 0;
     }
     ios_exe_win_state = 0;
-    dprintf( 2, "ml977: RELEASED the executable window to %p+%#lx (fixed-base main image)\n",
-             addr, (unsigned long)size );
+    dprintf( 2, "ml977: RELEASED the executable window to %p+%#lx (fixed-base main image%s)\n",
+             addr, (unsigned long)size, fixed_image ? ", relocation records stripped" : "" );
     ios_exe_win_note_pending( addr, size );   /* ml988 */
     return 1;
 }
@@ -8256,7 +8256,7 @@ static void ios_exe_win_note_dead_peb( void *dead_peb )
 static void *anon_mmap_tryfixed( void *start, size_t size, int prot, int flags )
 {
     ios_pool_va_warn( "anon_mmap_tryfixed", start, size );
-    ios_exe_win_claim( start, size );   /* ml977: hand over the window if this is the one */
+    ios_exe_win_claim( start, size, 0 );   /* ml977: hand over the window if this is the one */
     void *ptr;
 
     /* no [jit-tripwire] here: tryfixed is no-clobber by definition (fails on
@@ -18773,6 +18773,15 @@ static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_inf
 
     if (base)
     {
+        /* A small main EXE with relocations stripped cannot use the fallback
+         * address. DSR is 56MB and the generic 64MB floor keeps its preferred
+         * base reserved. Claim only for this PE characteristic, leaving the
+         * floor in place for ordinary relocatable images. The map below still
+         * commits or rolls back the claim through ios_exe_win_commit_claim. */
+        if (size < 64u * 1024u * 1024u &&
+            !(image_info->image_charact & IMAGE_FILE_DLL) &&
+            (image_info->image_charact & IMAGE_FILE_RELOCS_STRIPPED))
+            ios_exe_win_claim( base, size, 1 );
         status = map_view( view_ret, base, size, alloc_type, vprot, limit_low, limit_high, 0 );
         /* ml988: commit or roll back a pending fixed-base claim. No-ops unless
          * ios_exe_win_claim granted this exact interval during the call above. */
