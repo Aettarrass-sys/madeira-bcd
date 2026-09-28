@@ -145,15 +145,31 @@ index 5f6e22c..4315e9a 100644
  
    /* Count realized native passes, including clears and the final present.
     * No new PE ABI or emulated hot-path counters are needed. */
-@@ -1900,6 +1999,8 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
+@@ -1900,6 +1999,9 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
    wmt_census_batch(next, 2);
    id<MTLBlitCommandEncoder> encoder = (id<MTLBlitCommandEncoder>)params->encoder;
    while (next) {
-+    madeira_gpu_trace_command(encoder,
-+        [NSString stringWithFormat:@"blit opcode=%u", (unsigned)next->type]);
++    if (next->type != WMTBlitCommandCopyFromBufferToTexture)
++      madeira_gpu_trace_command(encoder,
++          [NSString stringWithFormat:@"blit opcode=%u", (unsigned)next->type]);
      switch ((enum WMTBlitCommandType)next->type) {
      default:
        assert(!next->type && "unhandled blit command type");
+@@ -1922,5 +2024,14 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
+         break;
+       wmt_stale_check(body->src, "blit copy src"); wmt_stale_check(body->dst, "blit copy dst");
++      id<MTLBuffer> src = (id<MTLBuffer>)body->src;
++      madeira_gpu_trace_command(encoder, [NSString stringWithFormat:
++          @"buffer-to-texture src=%p len=%llu offset=%llu row=%u image=%u size=%ux%ux%u dst=%p tex=%lux%lux%lu fmt=%lu storage=%lu slice=%u level=%u origin=%u,%u,%u",
++          (void *)src, (unsigned long long)src.length,
++          (unsigned long long)body->src_offset, body->bytes_per_row, body->bytes_per_image,
++          body->size.width, body->size.height, body->size.depth, (void *)dst,
++          (unsigned long)dst.width, (unsigned long)dst.height, (unsigned long)dst.depth,
++          (unsigned long)dst.pixelFormat, (unsigned long)dst.storageMode,
++          body->slice, body->level, body->origin.x, body->origin.y, body->origin.z]);
+       [encoder copyFromBuffer:(id<MTLBuffer>)body->src
+                  sourceOffset:body->src_offset
+             sourceBytesPerRow:body->bytes_per_row
 @@ -2076,6 +2177,8 @@ _MTLComputeCommandEncoder_encodeCommands(void *obj) {
    id<MTLComputeCommandEncoder> encoder = (id<MTLComputeCommandEncoder>)params->encoder;
    MTLSize threadgroup_size = {0, 0, 0};
