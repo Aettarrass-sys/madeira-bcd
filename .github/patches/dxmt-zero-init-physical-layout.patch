@@ -1,0 +1,28 @@
+diff --git a/src/dxmt/dxmt_resource_initializer.cpp b/src/dxmt/dxmt_resource_initializer.cpp
+index 687fa66..5718538 100644
+--- a/src/dxmt/dxmt_resource_initializer.cpp
++++ b/src/dxmt/dxmt_resource_initializer.cpp
+@@ -10,6 +10,8 @@
+ 
+ namespace dxmt {
+ 
++static inline uint32_t bc_fill_texel_size(enum WMTPixelFormat f);
++
+ #define ALLOC_BLIT(type, cmd)                                                                                          \
+   type *cmd = nullptr;                                                                                                 \
+   if (!allocateBlit(&cmd)) {                                                                                           \
+@@ -184,6 +186,14 @@ ResourceInitializer::initWithZero(
+ 
+   bool is_3d_tex = texture->textureType() == WMTTextureType3D;
+   size_t texel_size = MTLGetTexelSize(texture->pixelFormat());
++  /* winemetal remaps BC textures to uncompressed Metal formats when BC is
++   * unsupported. Size the zero source and its copy pitch for that physical
++   * format too; otherwise a 1024x1024 BC3 image gets a 1 MB buffer while
++   * Metal copies 4 MB of RGBA8, causing a GPU address fault. */
++  if (block_size == 4u && !device_.supportsBCTextureCompression()) {
++    block_size = 1u;
++    texel_size = bc_fill_texel_size(texture->pixelFormat());
++  }
+   size_t bytes_per_row_needed = texel_size * align(width_sub, block_size) / block_size;
+   size_t bytes_per_image_needed = bytes_per_row_needed * align(height_sub, block_size) / block_size;
+   size_t total_bytes_needed = bytes_per_image_needed * depth_sub;
