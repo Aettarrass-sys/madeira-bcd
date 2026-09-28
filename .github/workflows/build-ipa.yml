@@ -891,6 +891,12 @@ jobs:
           cp libdxmt_combined.a "$GITHUB_WORKSPACE/app/Madeira/"
           echo "::notice::libdxmt_combined.a $(wc -c < libdxmt_combined.a | tr -d ' ') bytes"
 
+      # PTDE uses d3d9=emulated, which loads this PE frontend. The native
+      # libdxmt_combined.a timing code alone cannot measure that path.
+      - name: Rebuild emulated i386 D3D9 with readback timing
+        shell: bash
+        run: bash tools/build-dxmt-i386-d3d9.sh
+
       # The native D3D12 runtime is ours to fix now, so build it from
       # research/madeira-d3d12 instead of shipping upstream's binary as is. A
       # failed build keeps the tracked DLL and says so.
@@ -1199,14 +1205,14 @@ jobs:
           test -s "$app/Assets.car"
           icon=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName' "$app/Info.plist")
           test "$icon" = AppIcon
-          python3 - "$app/Madeira" <<'PY'
+          python3 - "$app/i386-windows/d3d9-emulated.dll" <<'PY'
           import mmap, sys
-          with open(sys.argv[1], 'rb') as app_binary:
-              with mmap.mmap(app_binary.fileno(), 0, access=mmap.ACCESS_READ) as data:
+          with open(sys.argv[1], 'rb') as d3d9_binary:
+              with mmap.mmap(d3d9_binary.fileno(), 0, access=mmap.ACCESS_READ) as data:
                   if b'native GetRenderTargetData timing active' not in data:
-                      raise SystemExit('D3D9 readback timing marker missing from archived executable')
+                      raise SystemExit('D3D9 readback timing marker missing from archived emulated DLL')
           PY
-          echo "::notice::AppIcon and native D3D9 readback timing are in the archived app"
+          echo "::notice::AppIcon and emulated D3D9 readback timing are in the archived app"
 
       # A device run reached DXMT and died there:
       #   err: Failed to create metal view, it seems like your Wine has no
@@ -1319,7 +1325,9 @@ jobs:
         if: always()
         with:
           name: build-logs
-          path: "*.log"
+          path: |
+            *.log
+            build-out/*.log
           if-no-files-found: ignore
 
       - name: Dump first build errors (on failure)
