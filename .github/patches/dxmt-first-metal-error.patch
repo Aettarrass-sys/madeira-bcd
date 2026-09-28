@@ -1,27 +1,70 @@
 diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
-index 5f6e22c..6474f95 100644
+index 5f6e22c..4315e9a 100644
 --- a/src/winemetal/unix/winemetal_unix.c
 +++ b/src/winemetal/unix/winemetal_unix.c
-@@ -421,10 +421,17 @@ _MTLCommandQueue_commandBuffer(void *obj) {
+@@ -411,6 +411,42 @@ _NSAutoreleasePool_alloc_init(void *obj) {
+   return STATUS_SUCCESS;
+ }
+ 
++/* Diagnostic-only, bounded per-buffer traces. The i386 frontend calls these
++ * same native unix slots, so this covers the default emulated D3D9 path. */
++static _Atomic uint64_t g_madeira_gpu_buffer_serial;
++static _Atomic uint64_t g_madeira_gpu_encoder_serial;
++static _Atomic int g_madeira_first_metal_error_logged;
++static char g_madeira_gpu_trace_key;
++static char g_madeira_gpu_encoder_trace_key;
++
++static void
++madeira_gpu_trace_encoder(id<MTLCommandBuffer> buffer, id<MTLCommandEncoder> encoder,
++                          const char *kind, NSString *details) {
++  if (!encoder) return;
++  uint64_t serial = atomic_fetch_add_explicit(&g_madeira_gpu_encoder_serial, 1, memory_order_relaxed) + 1;
++  NSString *label = [NSString stringWithFormat:@"%@ enc=%llu %s %@",
++                     buffer.label ?: @"Madeira cb=?", (unsigned long long)serial, kind,
++                     details ?: @""];
++  encoder.label = label;
++  NSMutableDictionary *record = [NSMutableDictionary dictionaryWithObjectsAndKeys:
++      label, @"label", [NSMutableArray array], @"recent", @0, @"count", nil];
++  objc_setAssociatedObject(encoder, &g_madeira_gpu_encoder_trace_key,
++                           record, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++  NSMutableDictionary *all = objc_getAssociatedObject(buffer, &g_madeira_gpu_trace_key);
++  if (all) all[label] = record;
++}
++
++static void
++madeira_gpu_trace_command(id<MTLCommandEncoder> encoder, NSString *operation) {
++  NSMutableDictionary *record = objc_getAssociatedObject(encoder, &g_madeira_gpu_encoder_trace_key);
++  if (!record) return;
++  unsigned long long count = [record[@"count"] unsignedLongLongValue] + 1;
++  record[@"count"] = @(count);
++  NSMutableArray *recent = record[@"recent"];
++  if (recent.count == 64) [recent removeObjectAtIndex:0];
++  [recent addObject:[NSString stringWithFormat:@"#%llu %@", count, operation]];
++}
++
+ static NTSTATUS
+ _MTLCommandQueue_commandBuffer(void *obj) {
+   struct unixcall_generic_obj_obj_ret *params = obj;
+@@ -421,7 +457,17 @@ _MTLCommandQueue_commandBuffer(void *obj) {
      wmtr_pool_push(params->ret);   /* ml820: autoreleased natively */
      return STATUS_SUCCESS;
    }
 -  params->ret = (obj_handle_t)[(id<MTLCommandQueue>)params->handle commandBuffer];
-+  /* A diagnostic build needs the first fault even when the i386 DXMT frontend
-+   * uses its prebuilt d3d9-emulated.dll instead of the native D3D9 frontend. */
 +  MTLCommandBufferDescriptor *desc = [MTLCommandBufferDescriptor new];
 +  desc.errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
-+  params->ret = (obj_handle_t)[(id<MTLCommandQueue>)params->handle commandBufferWithDescriptor:desc];
++  id<MTLCommandBuffer> buffer = [(id<MTLCommandQueue>)params->handle commandBufferWithDescriptor:desc];
 +  [desc release];
++  if (buffer) {
++    uint64_t serial = atomic_fetch_add_explicit(&g_madeira_gpu_buffer_serial, 1, memory_order_relaxed) + 1;
++    buffer.label = [NSString stringWithFormat:@"Madeira cb=%llu", (unsigned long long)serial];
++    objc_setAssociatedObject(buffer, &g_madeira_gpu_trace_key,
++                             [NSMutableDictionary dictionary], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++  }
++  params->ret = (obj_handle_t)buffer;
    return STATUS_SUCCESS;
  }
  
-+static _Atomic int g_madeira_first_metal_error_logged;
-+
- static NTSTATUS
- _MTLCommandBuffer_commit(void *obj) {
-   struct unixcall_generic_obj_noret *params = obj;
-@@ -448,6 +455,23 @@ _MTLCommandBuffer_commit(void *obj) {
+@@ -448,6 +494,48 @@ _MTLCommandBuffer_commit(void *obj) {
        ios_frame_gpu(buffer.GPUStartTime > 0.0 && span > 0.0 ? (unsigned long long)(span * 1e9) : 0, depth);
      }];
    }
@@ -30,14 +73,39 @@ index 5f6e22c..6474f95 100644
 +        atomic_exchange_explicit(&g_madeira_first_metal_error_logged, 1, memory_order_relaxed)) return;
 +    @autoreleasepool {
 +      NSError *error = buffer.error;
-+      fprintf(stderr, "[gpu-first-metal] code=%ld error=%s\n", (long)error.code,
-+              error.description.UTF8String ?: "(no description)");
++      fprintf(stderr, "[gpu-first-metal] buffer=%s code=%ld error=%s\n",
++              buffer.label.UTF8String ?: "?", (long)error.code,
++              error.localizedDescription.UTF8String ?: "?");
 +      NSArray *infos = error.userInfo[MTLCommandBufferEncoderInfoErrorKey];
++      NSMutableDictionary *all = objc_getAssociatedObject(buffer, &g_madeira_gpu_trace_key);
++      fprintf(stderr, "[gpu-first-metal] encoder-info=%lu traced-encoders=%lu\n",
++              (unsigned long)infos.count, (unsigned long)all.count);
++      BOOL matched = NO;
 +      for (id<MTLCommandBufferEncoderInfo> info in infos) {
++        NSString *label = info.label;
 +        fprintf(stderr, "[gpu-first-metal-encoder] state=%ld label=%s\n",
-+                (long)info.errorState, info.label.UTF8String ?: "(no label)");
++                (long)info.errorState, label.UTF8String ?: "?");
 +        for (NSString *signpost in info.debugSignposts)
 +          fprintf(stderr, "[gpu-first-metal-signpost] %s\n", signpost.UTF8String);
++        NSMutableDictionary *record = all[label];
++        if (record) {
++          matched = YES;
++          fprintf(stderr, "[gpu-first-metal-trace] total-commands=%llu recent=%lu\n",
++                  [record[@"count"] unsignedLongLongValue],
++                  (unsigned long)[record[@"recent"] count]);
++          for (NSString *line in record[@"recent"])
++            fprintf(stderr, "[gpu-first-metal-trace] %s\n", line.UTF8String);
++        }
++      }
++      if (!matched) {
++        fprintf(stderr, "[gpu-first-metal] encoder label unavailable; dumping bounded traces for this buffer\n");
++        for (NSString *label in all) {
++          NSMutableDictionary *record = all[label];
++          fprintf(stderr, "[gpu-first-metal-trace] label=%s total-commands=%llu\n",
++                  label.UTF8String, [record[@"count"] unsignedLongLongValue]);
++          for (NSString *line in record[@"recent"])
++            fprintf(stderr, "[gpu-first-metal-trace] %s\n", line.UTF8String);
++        }
 +      }
 +      fflush(stderr);
 +    }
@@ -45,3 +113,116 @@ index 5f6e22c..6474f95 100644
    [(id<MTLCommandBuffer>)params->handle commit];
    return STATUS_SUCCESS;
  }
+@@ -1217,6 +1305,8 @@ _MTLCommandBuffer_blitCommandEncoder(void *obj) {
+     return STATUS_SUCCESS;
+   }
+   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle blitCommandEncoder];
++  madeira_gpu_trace_encoder((id<MTLCommandBuffer>)params->handle,
++                            (id<MTLCommandEncoder>)params->ret, "blit", nil);
+   if (params->ret) ios_frame_pass(1, 0, 0, 0);
+   return STATUS_SUCCESS;
+ }
+@@ -1236,6 +1326,8 @@ _MTLCommandBuffer_computeCommandEncoder(void *obj) {
+   }
+   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle
+       computeCommandEncoderWithDispatchType:params->arg ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial];
++  madeira_gpu_trace_encoder((id<MTLCommandBuffer>)params->handle,
++                            (id<MTLCommandEncoder>)params->ret, "compute", nil);
+   if (params->ret) ios_frame_pass(2, 0, 0, 0);
+   return STATUS_SUCCESS;
+ }
+@@ -1305,6 +1397,13 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
+   descriptor.visibilityResultBuffer = (id<MTLBuffer>)info->visibility_buffer;
+ 
+   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor];
++  NSString *attachment = [NSString stringWithFormat:@"target=%ux%u c0=%p depth=%p sample=%u",
++                          info->render_target_width, info->render_target_height,
++                          (void *)(uintptr_t)info->colors[0].texture,
++                          (void *)(uintptr_t)info->depth.texture,
++                          info->default_raster_sample_count];
++  madeira_gpu_trace_encoder((id<MTLCommandBuffer>)params->handle,
++                            (id<MTLCommandEncoder>)params->ret, "render", attachment);
+ 
+   /* Count realized native passes, including clears and the final present.
+    * No new PE ABI or emulated hot-path counters are needed. */
+@@ -1900,6 +1999,8 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
+   wmt_census_batch(next, 2);
+   id<MTLBlitCommandEncoder> encoder = (id<MTLBlitCommandEncoder>)params->encoder;
+   while (next) {
++    madeira_gpu_trace_command(encoder,
++        [NSString stringWithFormat:@"blit opcode=%u", (unsigned)next->type]);
+     switch ((enum WMTBlitCommandType)next->type) {
+     default:
+       assert(!next->type && "unhandled blit command type");
+@@ -2076,6 +2177,8 @@ _MTLComputeCommandEncoder_encodeCommands(void *obj) {
+   id<MTLComputeCommandEncoder> encoder = (id<MTLComputeCommandEncoder>)params->encoder;
+   MTLSize threadgroup_size = {0, 0, 0};
+   while (next) {
++    madeira_gpu_trace_command(encoder,
++        [NSString stringWithFormat:@"compute opcode=%u", (unsigned)next->type]);
+     switch ((enum WMTComputeCommandType)next->type) {
+     default:
+       assert(!next->type && "unhandled compute command type");
+@@ -2233,6 +2336,47 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
+   wmt_census_batch(next, 0);
+   id<MTLRenderCommandEncoder> encoder = (id<MTLRenderCommandEncoder>)params->encoder;
+   while (next) {
++    NSString *operation = [NSString stringWithFormat:@"render opcode=%u", (unsigned)next->type];
++    switch ((enum WMTRenderCommandType)next->type) {
++    case WMTRenderCommandSetVertexBuffer:
++    case WMTRenderCommandSetFragmentBuffer: {
++      const struct wmtcmd_render_setbuffer *b = (const void *)next;
++      operation = [NSString stringWithFormat:@"render opcode=%u buffer=%p offset=%llu slot=%u",
++          (unsigned)next->type, (void *)(uintptr_t)b->buffer,
++          (unsigned long long)b->offset, (unsigned)b->index];
++      break;
++    }
++    case WMTRenderCommandSetFragmentTexture:
++    case WMTRenderCommandSetVertexTexture: {
++      const struct wmtcmd_render_settexture *b = (const void *)next;
++      operation = [NSString stringWithFormat:@"render opcode=%u texture=%p slot=%u",
++          (unsigned)next->type, (void *)(uintptr_t)b->texture, (unsigned)b->index];
++      break;
++    }
++    case WMTRenderCommandSetPSO: {
++      const struct wmtcmd_render_setpso *b = (const void *)next;
++      operation = [NSString stringWithFormat:@"render PSO=%p", (void *)(uintptr_t)b->pso];
++      break;
++    }
++    case WMTRenderCommandDraw: {
++      const struct wmtcmd_render_draw *b = (const void *)next;
++      operation = [NSString stringWithFormat:@"render draw primitive=%u start=%llu count=%llu instances=%u",
++          (unsigned)b->primitive_type, (unsigned long long)b->vertex_start,
++          (unsigned long long)b->vertex_count, b->instance_count];
++      break;
++    }
++    case WMTRenderCommandDrawIndexed: {
++      const struct wmtcmd_render_draw_indexed *b = (const void *)next;
++      operation = [NSString stringWithFormat:@"render draw-indexed primitive=%u indices=%llu index-buffer=%p offset=%llu",
++          (unsigned)b->primitive_type, (unsigned long long)b->index_count,
++          (void *)(uintptr_t)b->index_buffer, (unsigned long long)b->index_buffer_offset];
++      break;
++    }
++    default: break;
++    }
++    madeira_gpu_trace_command(encoder, operation);
++    if (next->type == WMTRenderCommandDraw || next->type == WMTRenderCommandDrawIndexed)
++      [encoder insertDebugSignpost:operation];
+     switch ((enum WMTRenderCommandType)next->type) {
+     default:
+       assert(!next->type && "unhandled render command type");
+@@ -3593,7 +3737,13 @@ _MTLCommandEncoder_setLabel(void *args) {
+     }
+     return STATUS_SUCCESS;
+   }
+-  [(id<MTLCommandEncoder>)params->handle setLabel:(NSString *)params->arg];
++  id<MTLCommandEncoder> encoder = (id<MTLCommandEncoder>)params->handle;
++  if (objc_getAssociatedObject(encoder, &g_madeira_gpu_encoder_trace_key)) {
++    madeira_gpu_trace_command(encoder, [NSString stringWithFormat:@"guest-label=%@",
++                              (NSString *)params->arg ?: @"(nil)"]);
++  } else {
++    [encoder setLabel:(NSString *)params->arg];
++  }
+   return STATUS_SUCCESS;
+ }
+ 
