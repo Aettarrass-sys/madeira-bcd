@@ -15842,6 +15842,8 @@ static void *map_reserved_area_inner( void *limit_low, void *limit_high, size_t 
                                       int unix_prot, size_t align_mask )
 {
     void *ptr = NULL;
+    void *candidate, *mapped = NULL;
+    int map_errno = 0;
     struct reserved_area *area;
     /* iOS-Madeira ml520: time the aligned VA reservation.
      *
@@ -15894,7 +15896,57 @@ static void *map_reserved_area_inner( void *limit_low, void *limit_high, size_t 
             if (ptr) break;
         }
     }
-    if (ptr && anon_mmap_fixed( ptr, size, unix_prot, 0 ) != ptr) ptr = NULL;
+    candidate = ptr;
+    if (ptr && (mapped = anon_mmap_fixed( ptr, size, unix_prot, 0 )) != ptr)
+    {
+        map_errno = errno;
+        ptr = NULL;
+    }
+#ifdef WINE_IOS
+    /* Diagnose a guest-window miss at the point where it occurs. The later
+     * map_free_area() scan uses no-replace mappings against this window's
+     * PROT_NONE reservation, so its EEXIST does not explain this failure. */
+    if (!ptr && ios_wow_base() && (ULONG_PTR)limit_low >= ios_wow_base() &&
+        (ULONG_PTR)limit_low < ios_wow_base() + IOS_WOW_WINDOW_SIZE)
+    {
+        static unsigned reports;
+        if (reports++ < 32)
+        {
+            struct range_entry *range;
+            unsigned free_count = 0, reserved_count = 0;
+            size_t biggest = 0;
+            void *biggest_at = NULL, *reserved_at = NULL;
+            size_t reserved_size = 0;
+
+            for (range = free_ranges; range != free_ranges_end; ++range)
+            {
+                void *lo = max( range->base, limit_low );
+                void *hi = min( range->end, limit_high );
+                if (lo < hi)
+                {
+                    size_t span = (char *)hi - (char *)lo;
+                    free_count++;
+                    if (span > biggest) { biggest = span; biggest_at = lo; }
+                }
+            }
+            LIST_FOR_EACH_ENTRY( area, &reserved_areas, struct reserved_area, entry )
+            {
+                if (area->base < limit_high && (char *)area->base + area->size > (char *)limit_low)
+                {
+                    reserved_count++;
+                    if (!reserved_at) { reserved_at = area->base; reserved_size = area->size; }
+                }
+            }
+            dprintf( 2, "[wow-reserve] MISS range=%p..%p size=%p align=%p top=%d "
+                     "candidate=%p fixed_result=%p errno=%d reserved=%u first=%p+%p "
+                     "free_ranges=%u biggest=%p+%p preload=%p..%p\n",
+                     limit_low, limit_high, (void *)size, (void *)(align_mask + 1),
+                     top_down, candidate, mapped, map_errno, reserved_count,
+                     reserved_at, (void *)reserved_size, free_count, biggest_at,
+                     (void *)biggest, preload_reserve_start, preload_reserve_end );
+        }
+    }
+#endif
     return ptr;
 }
 
