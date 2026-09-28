@@ -1,0 +1,99 @@
+diff --git a/src/dxmt/dxmt_resource_initializer.cpp b/src/dxmt/dxmt_resource_initializer.cpp
+index 5718538..11b7269 100644
+--- a/src/dxmt/dxmt_resource_initializer.cpp
++++ b/src/dxmt/dxmt_resource_initializer.cpp
+@@ -150,6 +150,11 @@ uint64_t
+ ResourceInitializer::initWithZero(
+     const Texture *texture, TextureAllocation *allocation, uint32_t slice, uint32_t level
+ ) {
++  static const bool guard_marker = [] {
++    WARN("[zero-copy-guard] diagnostic-v1 active");
++    return true;
++  }();
++  (void)guard_marker;
+   if (auto dsv_planar = DepthStencilPlanarFlags(texture->pixelFormat())) {
+     return initDepthStencilWithZero(texture, allocation, slice, level, dsv_planar);
+   }
+@@ -186,11 +191,13 @@ ResourceInitializer::initWithZero(
+ 
+   bool is_3d_tex = texture->textureType() == WMTTextureType3D;
+   size_t texel_size = MTLGetTexelSize(texture->pixelFormat());
++  const bool is_bc = block_size == 4u;
++  const bool bc_supported = is_bc && device_.supportsBCTextureCompression();
+   /* winemetal remaps BC textures to uncompressed Metal formats when BC is
+    * unsupported. Size the zero source and its copy pitch for that physical
+    * format too; otherwise a 1024x1024 BC3 image gets a 1 MB buffer while
+    * Metal copies 4 MB of RGBA8, causing a GPU address fault. */
+-  if (block_size == 4u && !device_.supportsBCTextureCompression()) {
++  if (is_bc && !bc_supported) {
+     block_size = 1u;
+     texel_size = bc_fill_texel_size(texture->pixelFormat());
+   }
+@@ -202,6 +209,20 @@ ResourceInitializer::initWithZero(
+ 
+   do {
+     ALLOC_ZERO(zero, total_bytes_needed);
++    /* Only large BC zero uploads matter for the PTDE fault. The encoder also
++     * reports the actual MTLBuffer length, so these two logs can be paired. */
++    if (is_bc && width_sub >= 512 && height_sub >= 256) {
++      static unsigned logged;
++      if (logged < 32 || (logged & 255u) == 0)
++        WARN("[zero-init-layout] fmt=", (unsigned)texture->pixelFormat(),
++             " size=", width_sub, "x", height_sub, "x", depth_sub,
++             " level=", level, " bc-supported=", bc_supported,
++             " block=", block_size, " texel=", texel_size,
++             " row=", bytes_per_row_needed, " image=", bytes_per_image_needed,
++             " request=", total_bytes_needed, " cached=", zero_buffer_size_,
++             " src=", (uint64_t)(obj_handle_t)zero);
++      ++logged;
++    }
+     RETAIN(allocation);
+     ALLOC_BLIT(wmtcmd_blit_copy_from_buffer_to_texture, copy);
+ 
+@@ -641,4 +662,4 @@ ResourceInitializer::allocateZeroBuffer(size_t size) {
+   return zero_buffer_;
+ }
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index 8fbc950..dd67064 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -2032,6 +2032,35 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
+           (unsigned long)dst.width, (unsigned long)dst.height, (unsigned long)dst.depth,
+           (unsigned long)dst.pixelFormat, (unsigned long)dst.storageMode,
+           body->slice, body->level, body->origin.x, body->origin.y, body->origin.z]);
++      /* Validate the physical Metal layout before the GPU can read outside
++       * the source. In particular BC3 remapped to RGBA8 needs 4 MB for a
++       * 1024x1024 level even though its compressed source was only 1 MB. */
++      size_t bpp = 0;
++      if (format_bytes_per_pixel(dst.pixelFormat, &bpp) &&
++          body->size.width && body->size.height && body->size.depth) {
++        const uint64_t row_bytes = (uint64_t)body->size.width * bpp;
++        const uint64_t image_stride = body->bytes_per_image ? body->bytes_per_image :
++                                      (uint64_t)body->bytes_per_row * body->size.height;
++        const uint64_t len = src.length;
++        uint64_t remaining = body->src_offset <= len ? len - body->src_offset : 0;
++        bool valid = body->src_offset <= len && body->bytes_per_row >= row_bytes;
++        const uint64_t image_skip = (uint64_t)(body->size.depth - 1) * image_stride;
++        const uint64_t row_skip = (uint64_t)(body->size.height - 1) * body->bytes_per_row;
++        if (valid && image_skip <= remaining) remaining -= image_skip; else valid = false;
++        if (valid && row_skip <= remaining) remaining -= row_skip; else valid = false;
++        if (!valid || row_bytes > remaining) {
++          static _Atomic unsigned bad_copies;
++          unsigned n = atomic_fetch_add_explicit(&bad_copies, 1, memory_order_relaxed) + 1;
++          if (n <= 32 || (n & 255u) == 0)
++            fprintf(stderr, "[buffer-to-texture-bounds] SKIP #%u src=%p len=%llu offset=%llu row=%u image=%u size=%ux%ux%u bpp=%zu dst=%p fmt=%lu level=%u\n",
++                    n, (void *)src, (unsigned long long)len,
++                    (unsigned long long)body->src_offset, body->bytes_per_row,
++                    body->bytes_per_image, body->size.width, body->size.height,
++                    body->size.depth, bpp, (void *)dst,
++                    (unsigned long)dst.pixelFormat, body->level);
++          break;
++        }
++      }
+       [encoder copyFromBuffer:(id<MTLBuffer>)body->src
+                  sourceOffset:body->src_offset
+             sourceBytesPerRow:body->bytes_per_row
