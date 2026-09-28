@@ -45,6 +45,8 @@ jobs:
           git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-queue-timing.patch"
           git -C research/dxmt apply --check "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-encode-detail.patch"
           git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-encode-detail.patch"
+          git -C research/dxmt apply --check "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-direct-texture-residency.patch"
+          git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-direct-texture-residency.patch"
           git -C research/dxmt diff --check
 
       - name: Require the matching private converter package

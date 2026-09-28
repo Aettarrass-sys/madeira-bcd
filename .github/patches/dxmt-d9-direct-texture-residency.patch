@@ -1,0 +1,48 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index a3721ab..b16753b 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -8317,13 +8317,9 @@ EmitCommonRenderSetup_d9(
+       s.frag_view[stage] = 0;
+     }
+     if (s.frag_tex[stage] != mt) {
+-      if (mt) {
+-        auto &uc = ctx.encodeRenderCommand<wmtcmd_render_useresource>();
+-        uc.type = WMTRenderCommandUseResource;
+-        uc.resource = mt;
+-        uc.usage = WMTResourceUsageRead;
+-        uc.stages = WMTRenderStageFragment;
+-      }
++      // Metal tracks a texture bound directly with setFragmentTexture.
++      // ctx.access above still retains its allocation and tracks hazards;
++      // useResource is needed for indirect accesses, not this table binding.
+       auto &cmd = ctx.encodeRenderCommand<wmtcmd_render_settexture>();
+       cmd.type = WMTRenderCommandSetFragmentTexture;
+       cmd.texture = mt;
+@@ -8360,11 +8356,8 @@ EmitCommonRenderSetup_d9(
+     }
+     if (!mt)
+       continue;
+-    auto &uc = ctx.encodeRenderCommand<wmtcmd_render_useresource>();
+-    uc.type = WMTRenderCommandUseResource;
+-    uc.resource = mt;
+-    uc.usage = WMTResourceUsageRead;
+-    uc.stages = WMTRenderStageVertex;
++    // This VTF texture is also bound directly. Keep ctx.access above for
++    // allocation lifetime and hazards; Metal handles binding residency.
+     auto &cmd = ctx.encodeRenderCommand<wmtcmd_render_settexture>();
+     cmd.type = WMTRenderCommandSetVertexTexture;
+     cmd.texture = mt;
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index 5f6e22c..ca5b882 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -1735,7 +1735,7 @@ static void wmt_shadow_batch(const struct wmtcmd_base *head) {
+  * being measured. Enabled with DXMT_CMD_CENSUS=1; costs one predictable branch
+  * per command otherwise.
+  */
+-#define WMT_CENSUS_RENDER 40
++#define WMT_CENSUS_RENDER 48
+ #define WMT_CENSUS_COMPUTE 16
+ #define WMT_CENSUS_BLIT 12
+ 
