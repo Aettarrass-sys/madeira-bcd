@@ -15843,7 +15843,9 @@ static void *map_reserved_area_inner( void *limit_low, void *limit_high, size_t 
 {
     void *ptr = NULL;
     void *candidate, *mapped = NULL;
+    void *selected_end = NULL;
     int map_errno = 0;
+    unsigned retries = 0;
     struct reserved_area *area;
     /* iOS-Madeira ml520: time the aligned VA reservation.
      *
@@ -15876,7 +15878,7 @@ static void *map_reserved_area_inner( void *limit_low, void *limit_high, size_t 
             if (start < limit_low) start = (void *)ROUND_SIZE( 0, limit_low, host_page_mask );
             if (end > limit_high) end = ROUND_ADDR( limit_high, host_page_mask );
             ptr = find_reserved_free_area_outside_preloader( start, end, size, top_down, align_mask );
-            if (ptr) break;
+            if (ptr) { selected_end = end; break; }
         }
     }
     else
@@ -15893,14 +15895,55 @@ static void *map_reserved_area_inner( void *limit_low, void *limit_high, size_t 
             if (start < limit_low) start = (void *)ROUND_SIZE( 0, limit_low, host_page_mask );
             if (end > limit_high) end = ROUND_ADDR( limit_high, host_page_mask );
             ptr = find_reserved_free_area_outside_preloader( start, end, size, top_down, align_mask );
-            if (ptr) break;
+            if (ptr) { selected_end = end; break; }
         }
     }
     candidate = ptr;
     if (ptr && (mapped = anon_mmap_fixed( ptr, size, unix_prot, 0 )) != ptr)
     {
         map_errno = errno;
-        ptr = NULL;
+#ifdef WINE_IOS
+        /* A released section can leave one address that iOS refuses to
+         * replace even though Wine's free_ranges says it is available. Do
+         * not turn this one ENOMEM into failure of the entire 4 GB guest
+         * window: try a few other Wine-free positions in the same reserved
+         * area. This path is only entered after a failed fixed mapping. */
+        if (map_errno == ENOMEM && !top_down && selected_end &&
+            ios_wow_base() && (ULONG_PTR)limit_low >= ios_wow_base() &&
+            (ULONG_PTR)limit_low < ios_wow_base() + IOS_WOW_WINDOW_SIZE)
+        {
+            void *next = ptr;
+            static unsigned probed;
+            if (probed++ < 16)
+            {
+                char what[192];
+                ios_va_describe_range( ptr, size, what, sizeof(what) );
+                dprintf( 2, "[wow-reserve] first fixed-map ENOMEM at %p+%p: %s\n",
+                         ptr, (void *)size, what );
+            }
+            while (retries < 16 &&
+                   (char *)next + align_mask + 1 < (char *)selected_end)
+            {
+                next = find_reserved_free_area_outside_preloader(
+                    (char *)next + align_mask + 1, selected_end, size,
+                    top_down, align_mask );
+                if (!next) break;
+                retries++;
+                mapped = anon_mmap_fixed( next, size, unix_prot, 0 );
+                if (mapped == next)
+                {
+                    static unsigned recovered;
+                    ptr = next;
+                    if (recovered++ < 32)
+                        dprintf( 2, "[wow-reserve] RECOVERED first=%p next=%p size=%p retries=%u\n",
+                                 candidate, next, (void *)size, retries );
+                    break;
+                }
+                map_errno = errno;
+            }
+        }
+#endif
+        if (mapped != ptr) ptr = NULL;
     }
 #ifdef WINE_IOS
     /* Diagnose a guest-window miss at the point where it occurs. The later
@@ -15938,10 +15981,10 @@ static void *map_reserved_area_inner( void *limit_low, void *limit_high, size_t 
                 }
             }
             dprintf( 2, "[wow-reserve] MISS range=%p..%p size=%p align=%p top=%d "
-                     "candidate=%p fixed_result=%p errno=%d reserved=%u first=%p+%p "
+                     "candidate=%p fixed_result=%p errno=%d retries=%u reserved=%u first=%p+%p "
                      "free_ranges=%u biggest=%p+%p preload=%p..%p\n",
                      limit_low, limit_high, (void *)size, (void *)(align_mask + 1),
-                     top_down, candidate, mapped, map_errno, reserved_count,
+                     top_down, candidate, mapped, map_errno, retries, reserved_count,
                      reserved_at, (void *)reserved_size, free_count, biggest_at,
                      (void *)biggest, preload_reserve_start, preload_reserve_end );
         }
