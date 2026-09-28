@@ -1,0 +1,97 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index a3721ab..4f1a9cf 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -4799,6 +4799,7 @@ MTLD3D9Device::UpdateTexture(IDirect3DBaseTexture9 *pSourceTexture, IDirect3DBas
+ // d3d9_device.cpp, which forwards a DEFAULT-pool destination to StretchRect.
+ HRESULT STDMETHODCALLTYPE
+ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSurface9 *pDestSurface) {
++  const auto readback_start = std::chrono::steady_clock::now();
+   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Device_GetRenderTargetData);
+   D9DeviceLock lock = LockDevice();
+   // Wine main thread has no outer NSAutoreleasePool. GetRenderTargetData
+@@ -4856,6 +4857,43 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
+   uint64_t signal_seq = m_currentCmdSeq;
+   obj_handle_t event_handle = m_completionEvent.handle;
+ 
++  // This is the synchronous path used by the 16x16 readback seen once per
++  // PTDE gameplay frame. Count each blocking stage without logging each call.
++  auto finishReadback = [&](uint64_t seq) -> HRESULT {
++    using clock = std::chrono::steady_clock;
++    auto us = [](clock::duration elapsed) -> uint64_t {
++      return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
++    };
++    const auto prepared = clock::now();
++    commitCurrentChunkTimed(3);
++    const auto submitted = clock::now();
++    m_dxmtQueue->WaitCPUFence(seq);
++    const auto fenced = clock::now();
++    const bool completed = waitForGpuOrDeviceError(signal_seq);
++    const auto finished = clock::now();
++    m_targetReadbackPrepareUs += us(prepared - readback_start);
++    m_targetReadbackSubmitUs += us(submitted - prepared);
++    m_targetReadbackFenceUs += us(fenced - submitted);
++    m_targetReadbackGpuUs += us(finished - fenced);
++    if (dst_buffer_handle) ++m_targetReadbackBufferCount;
++    m_targetReadbackMaxUs = std::max(m_targetReadbackMaxUs, us(finished - readback_start));
++    if (!(++m_targetReadbackCount % 256)) {
++      Logger::warn(str::format("[d9-target-time] n=", m_targetReadbackCount,
++          " buffer-backed=", m_targetReadbackBufferCount,
++          " total-avg-us=", (m_targetReadbackPrepareUs + m_targetReadbackSubmitUs +
++                            m_targetReadbackFenceUs + m_targetReadbackGpuUs) / 256,
++          " max-us=", m_targetReadbackMaxUs,
++          " avg-us prepare=", m_targetReadbackPrepareUs / 256,
++          " submit=", m_targetReadbackSubmitUs / 256,
++          " cpu-fence=", m_targetReadbackFenceUs / 256,
++          " gpu-wait=", m_targetReadbackGpuUs / 256));
++      m_targetReadbackPrepareUs = m_targetReadbackSubmitUs = 0;
++      m_targetReadbackFenceUs = m_targetReadbackGpuUs = 0;
++      m_targetReadbackBufferCount = m_targetReadbackMaxUs = 0;
++    }
++    return completed ? D3D_OK : D3DERR_DEVICELOST;
++  };
++
+   if (dst_buffer_handle != 0) {
+     // Host-visible buffer backing (a buffer-backed SYSTEMMEM texture
+     // surface): copy straight into it with explicit bytesPerRow; the
+@@ -4891,11 +4929,7 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
+     // signal target is the pre-bump value.
+     uint64_t seq = m_dxmtQueue->CurrentSeqId();
+     noteReadback(2, sd);
+-    commitCurrentChunkTimed(3);
+-    m_dxmtQueue->WaitCPUFence(seq);
+-    if (!waitForGpuOrDeviceError(signal_seq))
+-      return D3DERR_DEVICELOST;
+-    return D3D_OK;
++    return finishReadback(seq);
+   }
+ 
+   // Mirror-backed destination (a CreateOffscreenPlainSurface SYSTEMMEM /
+@@ -4965,9 +4999,7 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
+ 
+   uint64_t seq = m_dxmtQueue->CurrentSeqId();
+   noteReadback(2, sd);
+-  commitCurrentChunkTimed(3);
+-  m_dxmtQueue->WaitCPUFence(seq);
+-  if (!waitForGpuOrDeviceError(signal_seq))
++  if (finishReadback(seq) != D3D_OK)
+     return D3DERR_DEVICELOST;
+ 
+   // The ring block is laid out at the mirror's row pitch, so the copy out
+diff --git a/src/d3d9/d3d9_device.hpp b/src/d3d9/d3d9_device.hpp
+index f77f25a..1d71ba4 100644
+--- a/src/d3d9/d3d9_device.hpp
++++ b/src/d3d9/d3d9_device.hpp
+@@ -209,6 +209,12 @@ public:
+   uint64_t m_readbackCount = 0;
+   uint64_t m_readbackBatches = 0, m_readbackWaitsSaved = 0;
+   uint64_t m_readbackBytes = 0;
++  // Diagnostic only: accumulated GetRenderTargetData time, reported every
++  // 256 calls so logging does not distort the per-frame readback path.
++  uint64_t m_targetReadbackCount = 0;
++  uint64_t m_targetReadbackPrepareUs = 0, m_targetReadbackSubmitUs = 0;
++  uint64_t m_targetReadbackFenceUs = 0, m_targetReadbackGpuUs = 0;
++  uint64_t m_targetReadbackBufferCount = 0, m_targetReadbackMaxUs = 0;
+   // Current device-wide frame latency, as Set/Get via the d3d9Ex API.
+   // Read by MTLD3D9SwapChain to clamp the queue's max_latency_ to
+   // min(m_frameLatency, BackBufferCount + 1): DXVK d3d9_swapchain.cpp
