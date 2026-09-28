@@ -14,6 +14,10 @@ DEST="$R/app/Madeira/i386-windows/d3d9-emulated.dll"
 JOBS="$(sysctl -n hw.ncpu)"
 mkdir -p "$OUT"
 export PATH="$TC:$PATH"
+grep -q 'Logger::warn(madeira_d9_target_time_marker)' "$D/src/d3d9/d3d9_device.cpp" || {
+  echo "::error::D3D9 timing patch was not applied to the compiled source"
+  exit 1
+}
 
 for tool in i686-w64-mingw32-clang i686-w64-mingw32-clang++ \
             i686-w64-mingw32-ar i686-w64-mingw32-strip \
@@ -127,8 +131,6 @@ with open(sys.argv[1], 'rb') as binary:
         pe = struct.unpack_from('<I', data, 0x3c)[0]
         if data[pe:pe + 4] != b'PE\0\0' or struct.unpack_from('<H', data, pe + 4)[0] != 0x14c:
             raise SystemExit('rebuilt D3D9 module is not i386 PE')
-        if b'DXMT GetRenderTargetData timing active' not in data:
-            raise SystemExit('D3D9 timing marker missing from rebuilt emulated DLL')
 PY
 mv "$TMP" "$DEST"
 echo "::notice::rebuilt i386 d3d9-emulated.dll with readback timing: $(wc -c < "$DEST") bytes"

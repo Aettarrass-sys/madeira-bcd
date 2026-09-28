@@ -1206,13 +1206,10 @@ jobs:
           test -s "$app/Assets.car"
           icon=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName' "$app/Info.plist")
           test "$icon" = AppIcon
-          python3 - "$app/i386-windows/d3d9-emulated.dll" <<'PY'
-          import mmap, sys
-          with open(sys.argv[1], 'rb') as d3d9_binary:
-              with mmap.mmap(d3d9_binary.fileno(), 0, access=mmap.ACCESS_READ) as data:
-                  if b'DXMT GetRenderTargetData timing active' not in data:
-                      raise SystemExit('D3D9 readback timing marker missing from archived emulated DLL')
-          PY
+          M=toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin
+          "$M/llvm-readobj" --coff-exports "$app/i386-windows/d3d9-emulated.dll" \
+            > build-out/archived-d3d9-exports.txt
+          grep -q 'Name: madeira_d9_target_time_marker' build-out/archived-d3d9-exports.txt
           echo "::notice::AppIcon and emulated D3D9 readback timing are in the archived app"
 
       # A device run reached DXMT and died there:
