@@ -89,15 +89,26 @@ if ! (cd "$D" && SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" \
   echo "::error::DXMT i386 setup failed"
   exit 1
 fi
+# Meson accepts its declared target name, not a Ninja output path. Capture
+# the actual DLL filename from Meson's target metadata before compiling.
+SOURCE="$(python3 - "$DB" <<'PY'
+import json, subprocess, sys
+targets = json.loads(subprocess.check_output(['meson', 'introspect', '--targets', sys.argv[1]]))
+matches = [p for t in targets if t['name'] == 'd3d9' and t['type'] == 'shared library'
+           for p in t['filename'] if p.endswith('.dll')]
+if len(matches) != 1:
+    raise SystemExit(f'expected one Meson D3D9 DLL target, found {matches!r}')
+print(matches[0])
+PY
+)"
 if ! SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" \
-    meson compile -C "$DB" src/d3d9/d3d9.dll \
+    meson compile -C "$DB" d3d9 \
     > "$OUT/dxmt-i386-build.log" 2>&1; then
   tail -100 "$OUT/dxmt-i386-build.log"
   echo "::error::DXMT i386 D3D9 build failed"
   exit 1
 fi
 
-SOURCE="$DB/src/d3d9/d3d9.dll"
 test -s "$SOURCE"
 TMP="$DEST.diagnostic.tmp"
 "$TC/i686-w64-mingw32-strip" -o "$TMP" "$SOURCE"
