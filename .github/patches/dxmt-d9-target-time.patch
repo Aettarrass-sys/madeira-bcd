@@ -1,19 +1,28 @@
 diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
-index a3721ab..0547b72 100644
+index a3721ab..3ba88d8 100644
 --- a/src/d3d9/d3d9_device.cpp
 +++ b/src/d3d9/d3d9_device.cpp
-@@ -4799,6 +4799,10 @@ MTLD3D9Device::UpdateTexture(IDirect3DBaseTexture9 *pSourceTexture, IDirect3DBas
+@@ -4797,8 +4797,19 @@ MTLD3D9Device::UpdateTexture(IDirect3DBaseTexture9 *pSourceTexture, IDirect3DBas
+ }
+ // GetRenderTargetData: RT -> SYSTEMMEM blit. Validation per DXVK
  // d3d9_device.cpp, which forwards a DEFAULT-pool destination to StretchRect.
++#ifdef _WIN32
++extern "C" __declspec(dllexport) const char madeira_d9_target_time_marker[] =
++    "[d9-target-time] DXMT GetRenderTargetData timing active";
++#else
++static constexpr char madeira_d9_target_time_marker[] =
++    "[d9-target-time] DXMT GetRenderTargetData timing active";
++#endif
  HRESULT STDMETHODCALLTYPE
  MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSurface9 *pDestSurface) {
 +  static std::atomic<bool> timing_announced{false};
 +  if (!timing_announced.exchange(true, std::memory_order_relaxed))
-+    Logger::warn("[d9-target-time] native GetRenderTargetData timing active");
++    Logger::warn(madeira_d9_target_time_marker);
 +  const auto readback_start = std::chrono::steady_clock::now();
    D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Device_GetRenderTargetData);
    D9DeviceLock lock = LockDevice();
    // Wine main thread has no outer NSAutoreleasePool. GetRenderTargetData
-@@ -4856,6 +4860,43 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
+@@ -4856,6 +4867,43 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
    uint64_t signal_seq = m_currentCmdSeq;
    obj_handle_t event_handle = m_completionEvent.handle;
  
@@ -57,7 +66,7 @@ index a3721ab..0547b72 100644
    if (dst_buffer_handle != 0) {
      // Host-visible buffer backing (a buffer-backed SYSTEMMEM texture
      // surface): copy straight into it with explicit bytesPerRow; the
-@@ -4891,11 +4932,7 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
+@@ -4891,11 +4939,7 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
      // signal target is the pre-bump value.
      uint64_t seq = m_dxmtQueue->CurrentSeqId();
      noteReadback(2, sd);
@@ -70,7 +79,7 @@ index a3721ab..0547b72 100644
    }
  
    // Mirror-backed destination (a CreateOffscreenPlainSurface SYSTEMMEM /
-@@ -4965,9 +5002,7 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
+@@ -4965,9 +5009,7 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
  
    uint64_t seq = m_dxmtQueue->CurrentSeqId();
    noteReadback(2, sd);

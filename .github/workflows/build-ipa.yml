@@ -1210,7 +1210,7 @@ jobs:
           import mmap, sys
           with open(sys.argv[1], 'rb') as d3d9_binary:
               with mmap.mmap(d3d9_binary.fileno(), 0, access=mmap.ACCESS_READ) as data:
-                  if b'native GetRenderTargetData timing active' not in data:
+                  if b'DXMT GetRenderTargetData timing active' not in data:
                       raise SystemExit('D3D9 readback timing marker missing from archived emulated DLL')
           PY
           echo "::notice::AppIcon and emulated D3D9 readback timing are in the archived app"

@@ -17,7 +17,8 @@ export PATH="$TC:$PATH"
 
 for tool in i686-w64-mingw32-clang i686-w64-mingw32-clang++ \
             i686-w64-mingw32-ar i686-w64-mingw32-strip \
-            i686-w64-mingw32-windres i686-w64-mingw32-dlltool; do
+            i686-w64-mingw32-windres i686-w64-mingw32-dlltool \
+            llvm-readobj; do
   test -x "$TC/$tool" || { echo "::error::missing $TC/$tool"; exit 1; }
 done
 test -x "$R/wine/build-native/tools/widl/widl" || {
@@ -112,6 +113,11 @@ fi
 test -s "$SOURCE"
 TMP="$DEST.diagnostic.tmp"
 "$TC/i686-w64-mingw32-strip" -o "$TMP" "$SOURCE"
+"$TC/llvm-readobj" --coff-exports "$TMP" > "$OUT/dxmt-i386-exports.txt"
+grep -q 'Name: madeira_d9_target_time_marker' "$OUT/dxmt-i386-exports.txt" || {
+  echo "::error::D3D9 timing marker export missing from rebuilt emulated DLL"
+  exit 1
+}
 python3 - "$TMP" <<'PY'
 import mmap, struct, sys
 with open(sys.argv[1], 'rb') as binary:
@@ -121,7 +127,7 @@ with open(sys.argv[1], 'rb') as binary:
         pe = struct.unpack_from('<I', data, 0x3c)[0]
         if data[pe:pe + 4] != b'PE\0\0' or struct.unpack_from('<H', data, pe + 4)[0] != 0x14c:
             raise SystemExit('rebuilt D3D9 module is not i386 PE')
-        if b'native GetRenderTargetData timing active' not in data:
+        if b'DXMT GetRenderTargetData timing active' not in data:
             raise SystemExit('D3D9 timing marker missing from rebuilt emulated DLL')
 PY
 mv "$TMP" "$DEST"
