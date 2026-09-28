@@ -492,6 +492,12 @@ jobs:
           test "$MINGW_OK" = 1
           test -x toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin/aarch64-w64-mingw32-clang++
 
+      # PTDE uses d3d9=emulated, which loads this PE frontend. Run this
+      # before the unrelated FEX/LLVM builds so a cross-build error fails fast.
+      - name: Rebuild emulated i386 D3D9 with readback timing
+        shell: bash
+        run: bash tools/build-dxmt-i386-d3d9.sh
+
       - name: Rebuild 32-bit xtajit.dll with WoW64 constructor repair
         shell: bash
         run: bash tools/build-xtajit-wow64.sh
@@ -890,12 +896,6 @@ jobs:
             obj/*.o "$GITHUB_WORKSPACE"/toolchains/llvm-ios-build/lib/*.a
           cp libdxmt_combined.a "$GITHUB_WORKSPACE/app/Madeira/"
           echo "::notice::libdxmt_combined.a $(wc -c < libdxmt_combined.a | tr -d ' ') bytes"
-
-      # PTDE uses d3d9=emulated, which loads this PE frontend. The native
-      # libdxmt_combined.a timing code alone cannot measure that path.
-      - name: Rebuild emulated i386 D3D9 with readback timing
-        shell: bash
-        run: bash tools/build-dxmt-i386-d3d9.sh
 
       # The native D3D12 runtime is ours to fix now, so build it from
       # research/madeira-d3d12 instead of shipping upstream's binary as is. A

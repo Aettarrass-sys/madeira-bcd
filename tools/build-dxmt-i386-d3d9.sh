@@ -23,6 +23,10 @@ done
 test -x "$R/wine/build-native/tools/widl/widl" || {
   echo "::error::native Wine tools are missing"; exit 1;
 }
+NATIVE_WINEBUILD="$R/wine/build-native/tools/winebuild/winebuild"
+test -x "$NATIVE_WINEBUILD" || {
+  echo "::error::native winebuild is missing: $NATIVE_WINEBUILD"; exit 1;
+}
 
 if [ ! -f "$B/Makefile" ]; then
   mkdir -p "$B"
@@ -36,10 +40,14 @@ if [ ! -f "$B/Makefile" ]; then
   fi
 fi
 
+# Cross-configured Wine uses the native host tools and has no local winebuild
+# Makefile target. DXMT's Meson file nevertheless expects it under B/tools.
+mkdir -p "$B/tools/winebuild"
+ln -sfn "$NATIVE_WINEBUILD" "$B/tools/winebuild/winebuild"
+
 # DXMT's Meson file links the Wine CRT and the ntdll/dbghelp import libraries.
 # Build those three archive targets, leaving the shipped i386 Wine farm intact.
 DEPS=(
-  tools/winebuild/winebuild
   libs/winecrt0/i386-windows/libwinecrt0.a
   dlls/ntdll/i386-windows/libntdll.a
   dlls/dbghelp/i386-windows/libdbghelp.a
