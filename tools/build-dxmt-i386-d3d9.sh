@@ -117,6 +117,14 @@ fi
 test -s "$SOURCE"
 TMP="$DEST.diagnostic.tmp"
 "$TC/i686-w64-mingw32-strip" -o "$TMP" "$SOURCE"
+grep -a -q '\[d9-target-detail\]' "$TMP" || {
+  echo "::error::D3D9 encoding detail missing from rebuilt emulated DLL"
+  exit 1
+}
+grep -a -q '\[d9-target-fine\]' "$TMP" || {
+  echo "::error::D3D9 Metal pass timing missing from rebuilt emulated DLL"
+  exit 1
+}
 "$TC/llvm-readobj" --coff-exports "$TMP" > "$OUT/dxmt-i386-exports.txt"
 grep -q 'Name: madeira_d9_target_time_marker' "$OUT/dxmt-i386-exports.txt" || {
   echo "::error::D3D9 timing marker export missing from rebuilt emulated DLL"

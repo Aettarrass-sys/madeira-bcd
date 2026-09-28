@@ -1,0 +1,405 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index d47d484..fca8cad 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -4875,6 +4875,7 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
+       return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+     };
+     const auto prepared = clock::now();
++    m_dxmtQueue->CurrentChunk()->timing.trace = true;
+     commitCurrentChunkTimed(3);
+     const auto submitted = clock::now();
+     m_dxmtQueue->WaitCPUFence(seq);
+@@ -4893,31 +4894,104 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
+     m_targetRetireUs += us(timing.fence_signal - timing.metal_complete);
+     m_targetWakeUs += us(fenced - timing.fence_signal);
+     m_targetAlreadyComplete += timing.already_complete;
++    const std::array<uint64_t, 6> stage_us{
++        us(timing.command_buffer_start - timing.encode_start),
++        us(timing.command_buffer_ready - timing.command_buffer_start),
++        us(timing.initializer_encoded - timing.command_buffer_ready),
++        us(timing.execute_end - timing.execute_start),
++        us(timing.flush_end - timing.execute_end),
++        us(timing.encode_end - timing.commit_start)};
++    for (size_t i = 0; i < stage_us.size(); ++i) {
++      m_targetStageUs[i] += stage_us[i];
++      m_targetStageMaxUs[i] = std::max(m_targetStageMaxUs[i], stage_us[i]);
++      m_targetFlushNs[i] += timing.flush.nanoseconds[i];
++      m_targetFlushCounts[i] += timing.flush.counts[i];
++    }
++    for (size_t i = 0; i < m_targetFineNs.size(); ++i)
++      m_targetFineNs[i] += timing.flush.fine_nanoseconds[i];
++    m_targetInitializerWaits += timing.initializer_wait;
++    m_targetOps += timing.ops;
++    m_targetRender += timing.render;
++    m_targetBlit += timing.blit;
++    m_targetCompute += timing.compute;
++    m_targetClear += timing.clear;
+     if (dst_buffer_handle) ++m_targetReadbackBufferCount;
+     m_targetReadbackMaxUs = std::max(m_targetReadbackMaxUs, us(finished - readback_start));
+-    if (!(++m_targetReadbackCount % 256)) {
++    ++m_targetWindowCount;
++    if (++m_targetReadbackCount == 32 || !(m_targetReadbackCount % 256)) {
+       Logger::warn(str::format("[d9-target-time] n=", m_targetReadbackCount,
++          " window=", m_targetWindowCount,
+           " buffer-backed=", m_targetReadbackBufferCount,
+           " total-avg-us=", (m_targetReadbackPrepareUs + m_targetReadbackSubmitUs +
+-                            m_targetReadbackFenceUs + m_targetReadbackGpuUs) / 256,
++                            m_targetReadbackFenceUs + m_targetReadbackGpuUs) / m_targetWindowCount,
+           " max-us=", m_targetReadbackMaxUs,
+-          " avg-us prepare=", m_targetReadbackPrepareUs / 256,
+-          " submit=", m_targetReadbackSubmitUs / 256,
+-          " cpu-fence=", m_targetReadbackFenceUs / 256,
+-          " gpu-wait=", m_targetReadbackGpuUs / 256,
+-          " | queue-avg-us=", m_targetQueueUs / 256,
+-          " encode=", m_targetEncodeUs / 256,
+-          " finish-queue=", m_targetFinishQueueUs / 256,
+-          " metal-wait=", m_targetMetalWaitUs / 256,
+-          " retire=", m_targetRetireUs / 256,
+-          " caller-wake=", m_targetWakeUs / 256,
++          " avg-us prepare=", m_targetReadbackPrepareUs / m_targetWindowCount,
++          " submit=", m_targetReadbackSubmitUs / m_targetWindowCount,
++          " cpu-fence=", m_targetReadbackFenceUs / m_targetWindowCount,
++          " gpu-wait=", m_targetReadbackGpuUs / m_targetWindowCount,
++          " | queue-avg-us=", m_targetQueueUs / m_targetWindowCount,
++          " encode=", m_targetEncodeUs / m_targetWindowCount,
++          " finish-queue=", m_targetFinishQueueUs / m_targetWindowCount,
++          " metal-wait=", m_targetMetalWaitUs / m_targetWindowCount,
++          " retire=", m_targetRetireUs / m_targetWindowCount,
++          " caller-wake=", m_targetWakeUs / m_targetWindowCount,
+           " already-complete=", m_targetAlreadyComplete));
++      Logger::warn(str::format("[d9-target-detail] n=", m_targetReadbackCount,
++          " window=", m_targetWindowCount,
++          " avg-us pre-buffer=", m_targetStageUs[0] / m_targetWindowCount,
++          " buffer-create=", m_targetStageUs[1] / m_targetWindowCount,
++          " init-encode=", m_targetStageUs[2] / m_targetWindowCount,
++          " execute=", m_targetStageUs[3] / m_targetWindowCount,
++          " flush=", m_targetStageUs[4] / m_targetWindowCount,
++          " commit=", m_targetStageUs[5] / m_targetWindowCount,
++          " | max-us pre-buffer=", m_targetStageMaxUs[0],
++          " buffer-create=", m_targetStageMaxUs[1],
++          " init-encode=", m_targetStageMaxUs[2],
++          " execute=", m_targetStageMaxUs[3],
++          " flush=", m_targetStageMaxUs[4],
++          " commit=", m_targetStageMaxUs[5],
++          " | flush-avg-us render=", m_targetFlushNs[0] / (m_targetWindowCount * 1000),
++          " blit=", m_targetFlushNs[1] / (m_targetWindowCount * 1000),
++          " present=", m_targetFlushNs[2] / (m_targetWindowCount * 1000),
++          " compute=", m_targetFlushNs[3] / (m_targetWindowCount * 1000),
++          " other=", m_targetFlushNs[4] / (m_targetWindowCount * 1000)));
++      Logger::warn(str::format("[d9-target-work] n=", m_targetReadbackCount,
++          " initializer-waits=", m_targetInitializerWaits,
++          " ops=", m_targetOps, " render=", m_targetRender,
++          " blit=", m_targetBlit, " compute=", m_targetCompute,
++          " clear=", m_targetClear,
++          " | flush-counts render=", m_targetFlushCounts[0],
++          " blit=", m_targetFlushCounts[1],
++          " present=", m_targetFlushCounts[2],
++          " compute=", m_targetFlushCounts[3],
++          " other=", m_targetFlushCounts[4]));
++      Logger::warn(str::format("[d9-target-fine] n=", m_targetReadbackCount,
++          " window=", m_targetWindowCount,
++          " avg-us render-pre=", m_targetFineNs[0] / (m_targetWindowCount * 1000),
++          " render-create=", m_targetFineNs[1] / (m_targetWindowCount * 1000),
++          " render-bind=", m_targetFineNs[2] / (m_targetWindowCount * 1000),
++          " render-commands=", m_targetFineNs[3] / (m_targetWindowCount * 1000),
++          " render-end=", m_targetFineNs[4] / (m_targetWindowCount * 1000),
++          " blit-create=", m_targetFineNs[5] / (m_targetWindowCount * 1000),
++          " blit-commands=", m_targetFineNs[6] / (m_targetWindowCount * 1000),
++          " blit-end=", m_targetFineNs[7] / (m_targetWindowCount * 1000),
++          " present-encode=", m_targetFineNs[8] / (m_targetWindowCount * 1000),
++          " present-request=", m_targetFineNs[9] / (m_targetWindowCount * 1000)));
+       m_targetReadbackPrepareUs = m_targetReadbackSubmitUs = 0;
+       m_targetReadbackFenceUs = m_targetReadbackGpuUs = 0;
+       m_targetReadbackBufferCount = m_targetReadbackMaxUs = 0;
+       m_targetQueueUs = m_targetEncodeUs = m_targetFinishQueueUs = 0;
+       m_targetMetalWaitUs = m_targetRetireUs = m_targetWakeUs = 0;
+       m_targetAlreadyComplete = 0;
++      m_targetStageUs.fill(0);
++      m_targetStageMaxUs.fill(0);
++      m_targetFlushNs.fill(0);
++      m_targetFlushCounts.fill(0);
++      m_targetFineNs.fill(0);
++      m_targetInitializerWaits = 0;
++      m_targetOps = m_targetRender = m_targetBlit = 0;
++      m_targetCompute = m_targetClear = 0;
++      m_targetWindowCount = 0;
+     }
+     return completed ? D3D_OK : D3DERR_DEVICELOST;
+   };
+diff --git a/src/d3d9/d3d9_device.hpp b/src/d3d9/d3d9_device.hpp
+index 4fd015c..d009a55 100644
+--- a/src/d3d9/d3d9_device.hpp
++++ b/src/d3d9/d3d9_device.hpp
+@@ -219,6 +219,16 @@ public:
+   uint64_t m_targetFinishQueueUs = 0, m_targetMetalWaitUs = 0;
+   uint64_t m_targetRetireUs = 0, m_targetWakeUs = 0;
+   uint64_t m_targetAlreadyComplete = 0;
++  // Per-256-readback stage and workload totals; no per-call log I/O.
++  std::array<uint64_t, 6> m_targetStageUs{};
++  std::array<uint64_t, 6> m_targetStageMaxUs{};
++  std::array<uint64_t, 5> m_targetFlushNs{};
++  std::array<uint64_t, 5> m_targetFlushCounts{};
++  std::array<uint64_t, 10> m_targetFineNs{};
++  uint64_t m_targetInitializerWaits = 0;
++  uint64_t m_targetOps = 0, m_targetRender = 0, m_targetBlit = 0;
++  uint64_t m_targetCompute = 0, m_targetClear = 0;
++  uint64_t m_targetWindowCount = 0;
+   // Current device-wide frame latency, as Set/Get via the d3d9Ex API.
+   // Read by MTLD3D9SwapChain to clamp the queue's max_latency_ to
+   // min(m_frameLatency, BackBufferCount + 1): DXVK d3d9_swapchain.cpp
+diff --git a/src/dxmt/dxmt_command_queue.cpp b/src/dxmt/dxmt_command_queue.cpp
+index a544eb4..8e8ed11 100644
+--- a/src/dxmt/dxmt_command_queue.cpp
++++ b/src/dxmt/dxmt_command_queue.cpp
+@@ -79,7 +79,10 @@ CommandQueue::CommitCurrentChunk() {
+   chunk.chunk_event_id = GetNextEventSeqId();
+   chunk.frame_ = frame_count;
+   chunk.resource_initializer_event_id = initializer.flushToWait();
++  const bool trace_readback = chunk.timing.trace;
+   chunk.timing = {};
++  chunk.timing.trace = trace_readback;
++  chunk.timing.initializer_wait = chunk.resource_initializer_event_id != 0;
+   auto& statistics = CurrentFrameStatistics();
+   statistics.command_buffer_count++;
+ #if ASYNC_ENCODING
+@@ -136,12 +139,23 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
+   }
+   }
+ 
++  if (chunk.timing.trace) chunk.timing.command_buffer_start = std::chrono::steady_clock::now();
+   auto cmdbuf = commandQueue.commandBuffer();
++  if (chunk.timing.trace) chunk.timing.command_buffer_ready = std::chrono::steady_clock::now();
+   chunk.attached_cmdbuf = cmdbuf;
+   if (chunk.resource_initializer_event_id) {
+     cmdbuf.encodeWaitForEvent(initializer.event(), chunk.resource_initializer_event_id);
+   }
++  if (chunk.timing.trace) chunk.timing.initializer_encoded = std::chrono::steady_clock::now();
+   chunk.encode(chunk.attached_cmdbuf, this->argument_encoding_ctx);
++  if (chunk.timing.trace) {
++    chunk.timing.ops = chunk.encoded_op_count;
++    chunk.timing.render = chunk.render_pass_count;
++    chunk.timing.blit = chunk.blit_pass_count;
++    chunk.timing.compute = chunk.compute_pass_count;
++    chunk.timing.clear = chunk.clear_pass_count;
++  }
++  if (chunk.timing.trace) chunk.timing.commit_start = std::chrono::steady_clock::now();
+   cmdbuf.commit();
+   chunk.timing.encode_end = std::chrono::steady_clock::now();
+ 
+@@ -234,6 +248,7 @@ CommandQueue::WaitForFinishThread() {
+ 
+     chunk.reset();
+     chunk.timing.fence_signal = std::chrono::steady_clock::now();
++    chunk.timing.trace = false;
+     cpu_coherent.signal(internal_seq);
+     chunk_ongoing.fetch_sub(1, std::memory_order_release);
+     dxmt::atomic_notify_one(chunk_ongoing);
+diff --git a/src/dxmt/dxmt_command_queue.hpp b/src/dxmt/dxmt_command_queue.hpp
+index 551cdf9..377a59e 100644
+--- a/src/dxmt/dxmt_command_queue.hpp
++++ b/src/dxmt/dxmt_command_queue.hpp
+@@ -98,8 +98,14 @@ class CommandChunk {
+ public:
+   struct Timing {
+     std::chrono::steady_clock::time_point ready, encode_start, encode_end;
++    std::chrono::steady_clock::time_point command_buffer_start, command_buffer_ready, initializer_encoded;
++    std::chrono::steady_clock::time_point execute_start, execute_end, flush_end, commit_start;
+     std::chrono::steady_clock::time_point finish_start, metal_complete, fence_signal;
++    FlushDiagnostics flush;
++    bool trace = false;
+     bool already_complete = false;
++    bool initializer_wait = false;
++    uint32_t ops = 0, render = 0, blit = 0, compute = 0, clear = 0;
+   };
+ 
+   CommandChunk(const CommandChunk &) = delete; // delete copy constructor
+@@ -126,10 +132,14 @@ public:
+     const auto compute_before = statistics.compute_pass_count;
+     const auto clear_before = statistics.clear_pass_count;
+     auto t0 = clock::now();
++    if (timing.trace) timing.execute_start = std::chrono::steady_clock::now();
+     list_enc.execute(enc);
+     attached_cmdbuf = cmdbuf;
+     auto t1 = clock::now();
+-    visibility_readback = enc.flushCommands(cmdbuf, chunk_id, chunk_event_id);
++    if (timing.trace) timing.execute_end = std::chrono::steady_clock::now();
++    visibility_readback = enc.flushCommands(cmdbuf, chunk_id, chunk_event_id,
++                                             timing.trace ? &timing.flush : nullptr);
++    if (timing.trace) timing.flush_end = std::chrono::steady_clock::now();
+     render_pass_count = statistics.render_pass_count - render_before;
+     blit_pass_count = statistics.blit_pass_count - blit_before;
+     compute_pass_count = statistics.compute_pass_count - compute_before;
+diff --git a/src/dxmt/dxmt_context.cpp b/src/dxmt/dxmt_context.cpp
+index b8c0266..668acca 100644
+--- a/src/dxmt/dxmt_context.cpp
++++ b/src/dxmt/dxmt_context.cpp
+@@ -815,7 +815,8 @@ ArgumentEncodingContext::$$setEncodingContext(uint64_t seq_id, uint64_t frame_id
+ constexpr unsigned kEncoderOptimizerThreshold = 64;
+ 
+ std::unique_ptr<VisibilityResultReadback>
+-ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId, uint64_t event_seq_id) {
++ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId, uint64_t event_seq_id,
++                                       FlushDiagnostics *diag) {
+   assert(!encoder_current);
+ 
+   /* iOS-Madeira 2026-07-03: drain autoreleased thunk objects once per flush.
+@@ -897,7 +898,9 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+ 
+   while (encoder_index) {
+     auto current = encoders[encoder_count - encoder_index];
+-    switch (current->type) {
++    const auto encoder_type = current->type;
++    const auto encoder_start = diag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++    switch (encoder_type) {
+     case EncoderType::Render: {
+       auto data = static_cast<RenderEncoderData *>(current);
+       WMTRenderPassInfo render_pass_info;
+@@ -952,7 +955,9 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+         render_pass_info.visibility_buffer = visibility_readback->visibility_result_heap;
+       }
+       auto gpu_buffer_ = data->allocated_argbuf;
++      const auto render_create_start = diag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+       auto encoder = cmdbuf.renderCommandEncoder(render_pass_info);
++      const auto render_created = diag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+       encoder.setVertexBuffer(gpu_buffer_, 0, 16);
+       encoder.setVertexBuffer(gpu_buffer_, 0, 29);
+       encoder.setVertexBuffer(gpu_buffer_, 0, 30);
+@@ -1057,8 +1062,21 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+             WMTRenderStageVertex | WMTRenderStageMesh | WMTRenderStageObject
+         );
+       }
++      const auto render_commands_start = diag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+       encoder.encodeCommands(&data->cmd_head);
++      const auto render_commands_end = diag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+       encoder.endEncoding();
++      if (diag) {
++        const auto render_end = std::chrono::steady_clock::now();
++        auto ns = [](std::chrono::steady_clock::duration d) -> uint64_t {
++          return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(d).count());
++        };
++        diag->fine_nanoseconds[0] += ns(render_create_start - encoder_start);
++        diag->fine_nanoseconds[1] += ns(render_created - render_create_start);
++        diag->fine_nanoseconds[2] += ns(render_commands_start - render_created);
++        diag->fine_nanoseconds[3] += ns(render_commands_end - render_commands_start);
++        diag->fine_nanoseconds[4] += ns(render_end - render_commands_end);
++      }
+       data->~RenderEncoderData();
+       break;
+     }
+@@ -1082,8 +1100,19 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+     case EncoderType::Blit: {
+       auto data = static_cast<BlitEncoderData *>(current);
+       auto encoder = cmdbuf.blitCommandEncoder();
++      const auto blit_created = diag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+       encoder.encodeCommands(&data->cmd_head);
++      const auto blit_commands_end = diag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+       encoder.endEncoding();
++      if (diag) {
++        const auto blit_end = std::chrono::steady_clock::now();
++        auto ns = [](std::chrono::steady_clock::duration d) -> uint64_t {
++          return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(d).count());
++        };
++        diag->fine_nanoseconds[5] += ns(blit_created - encoder_start);
++        diag->fine_nanoseconds[6] += ns(blit_commands_end - blit_created);
++        diag->fine_nanoseconds[7] += ns(blit_end - blit_commands_end);
++      }
+       data->~BlitEncoderData();
+       break;
+     }
+@@ -1091,6 +1120,7 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+       auto data = static_cast<PresentData *>(current);
+       auto t0 = clock::now();
+       auto drawable = data->presenter->encodeCommands(cmdbuf, {}, data->backbuffer, data->metadata);
++      const auto present_encoded = diag ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+       auto t1 = clock::now();
+       currentFrameStatistics().drawable_blocking_interval += (t1 - t0);
+       /* iOS-Madeira 2026-07-03 EXPERIMENT: always plain presentDrawable.
+@@ -1107,6 +1137,14 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+       /* nil drawable = RAW-mode frame skip (mailbox) — nothing to present */
+       if (drawable)
+         cmdbuf.presentDrawable(drawable);
++      if (diag) {
++        const auto present_end = std::chrono::steady_clock::now();
++        auto ns = [](std::chrono::steady_clock::duration d) -> uint64_t {
++          return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(d).count());
++        };
++        diag->fine_nanoseconds[8] += ns(present_encoded - encoder_start);
++        diag->fine_nanoseconds[9] += ns(present_end - present_encoded);
++      }
+       data->~PresentData();
+       break;
+     }
+@@ -1353,6 +1391,24 @@ ArgumentEncodingContext::flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId
+     default:
+       break;
+     }
++    if (diag) {
++      unsigned bucket = 4;
++      switch (encoder_type) {
++      case EncoderType::Render:
++      case EncoderType::Clear:
++      case EncoderType::Resolve:
++      case EncoderType::StretchBlit: bucket = 0; break;
++      case EncoderType::Blit: bucket = 1; break;
++      case EncoderType::Present: bucket = 2; break;
++      case EncoderType::Compute:
++      case EncoderType::SpatialUpscale:
++      case EncoderType::TemporalUpscale: bucket = 3; break;
++      default: break;
++      }
++      diag->nanoseconds[bucket] += static_cast<uint64_t>(
++          std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - encoder_start).count());
++      ++diag->counts[bucket];
++    }
+     encoder_index--;
+   }
+   encoder_head.next = nullptr;
+diff --git a/src/dxmt/dxmt_context.hpp b/src/dxmt/dxmt_context.hpp
+index a455293..e1b7976 100644
+--- a/src/dxmt/dxmt_context.hpp
++++ b/src/dxmt/dxmt_context.hpp
+@@ -13,7 +13,9 @@
+ #include "log/log.hpp"
+ #include "rc/util_rc_ptr.hpp"
+ #include "airconv_public.h"
++#include <array>
+ #include <cassert>
++#include <chrono>
+ #include <optional>
+ 
+ #define DXMT_IMPLEMENT_ME __builtin_unreachable();
+@@ -96,6 +98,16 @@ enum class EncoderType {
+   WaitForEvent,
+ };
+ 
++// Only populated for a traced synchronous readback chunk. Buckets are
++// render/resolve/clear, blit, present, compute/upscale, and sync/other.
++struct FlushDiagnostics {
++  std::array<uint64_t, 5> nanoseconds{};
++  std::array<uint32_t, 5> counts{};
++  // render: prepare/create/bind/commands/end; blit: create/commands/end;
++  // present: obtain+encode drawable / request presentation.
++  std::array<uint64_t, 10> fine_nanoseconds{};
++};
++
+ struct EncoderData {
+   EncoderType type;
+   EncoderData *next = nullptr;
+@@ -780,7 +792,8 @@ public:
+   
+   AllocatedTempBufferSlice allocateTempBuffer1(size_t size, size_t alignment);
+ 
+-  std::unique_ptr<VisibilityResultReadback> flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId, uint64_t event_seq_id);
++  std::unique_ptr<VisibilityResultReadback> flushCommands(WMT::CommandBuffer cmdbuf, uint64_t seqId,
++                                                           uint64_t event_seq_id, FlushDiagnostics *diag = nullptr);
+ 
+   uint64_t currentSeqId() {return seq_id_;}
+ 
+@@ -958,4 +971,4 @@ ArgumentEncodingContext::bindOutputTexture<PipelineStage::Pixel>(
+   entry.viewId = viewId;
+ }
+ 
+-} // namespace dxmt
+\ No newline at end of file
++} // namespace dxmt
