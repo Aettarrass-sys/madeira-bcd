@@ -29,7 +29,7 @@ jobs:
 
       # Keep the upstream DXMT gitlink pinned. Apply the bounded GPU diagnostic
       # locally so the build remains reproducible without a second repository.
-      - name: Apply DXMT first GPU error diagnostics
+      - name: Apply DXMT GPU and D3D9 diagnostics
         run: |
           git -C research/dxmt apply --check "$GITHUB_WORKSPACE/.github/patches/dxmt-gpu-first-error.patch"
           git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-gpu-first-error.patch"
@@ -1190,6 +1190,23 @@ jobs:
           test "$minimum_os" = 18.0
           xcrun vtool -show-build "$app/Madeira" | tee build-out/madeira-build-version.txt
           grep -Eq 'minos[[:space:]]+18[.]0' build-out/madeira-build-version.txt
+
+      - name: Verify icon and D3D9 timing code in archived app
+        shell: bash
+        run: |
+          set -euo pipefail
+          app=build-out/Madeira.xcarchive/Products/Applications/Madeira.app
+          test -s "$app/Assets.car"
+          icon=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconName' "$app/Info.plist")
+          test "$icon" = AppIcon
+          python3 - "$app/Madeira" <<'PY'
+          import mmap, sys
+          with open(sys.argv[1], 'rb') as app_binary:
+              with mmap.mmap(app_binary.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                  if b'native GetRenderTargetData timing active' not in data:
+                      raise SystemExit('D3D9 readback timing marker missing from archived executable')
+          PY
+          echo "::notice::AppIcon and native D3D9 readback timing are in the archived app"
 
       # A device run reached DXMT and died there:
       #   err: Failed to create metal view, it seems like your Wine has no
