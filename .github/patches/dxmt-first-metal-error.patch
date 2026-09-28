@@ -1,0 +1,47 @@
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index 5f6e22c..6474f95 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -421,10 +421,17 @@ _MTLCommandQueue_commandBuffer(void *obj) {
+     wmtr_pool_push(params->ret);   /* ml820: autoreleased natively */
+     return STATUS_SUCCESS;
+   }
+-  params->ret = (obj_handle_t)[(id<MTLCommandQueue>)params->handle commandBuffer];
++  /* A diagnostic build needs the first fault even when the i386 DXMT frontend
++   * uses its prebuilt d3d9-emulated.dll instead of the native D3D9 frontend. */
++  MTLCommandBufferDescriptor *desc = [MTLCommandBufferDescriptor new];
++  desc.errorOptions = MTLCommandBufferErrorOptionEncoderExecutionStatus;
++  params->ret = (obj_handle_t)[(id<MTLCommandQueue>)params->handle commandBufferWithDescriptor:desc];
++  [desc release];
+   return STATUS_SUCCESS;
+ }
+ 
++static _Atomic int g_madeira_first_metal_error_logged;
++
+ static NTSTATUS
+ _MTLCommandBuffer_commit(void *obj) {
+   struct unixcall_generic_obj_noret *params = obj;
+@@ -448,6 +455,23 @@ _MTLCommandBuffer_commit(void *obj) {
+       ios_frame_gpu(buffer.GPUStartTime > 0.0 && span > 0.0 ? (unsigned long long)(span * 1e9) : 0, depth);
+     }];
+   }
++  [(id<MTLCommandBuffer>)params->handle addCompletedHandler:^(id<MTLCommandBuffer> buffer) {
++    if (buffer.status != MTLCommandBufferStatusError ||
++        atomic_exchange_explicit(&g_madeira_first_metal_error_logged, 1, memory_order_relaxed)) return;
++    @autoreleasepool {
++      NSError *error = buffer.error;
++      fprintf(stderr, "[gpu-first-metal] code=%ld error=%s\n", (long)error.code,
++              error.description.UTF8String ?: "(no description)");
++      NSArray *infos = error.userInfo[MTLCommandBufferEncoderInfoErrorKey];
++      for (id<MTLCommandBufferEncoderInfo> info in infos) {
++        fprintf(stderr, "[gpu-first-metal-encoder] state=%ld label=%s\n",
++                (long)info.errorState, info.label.UTF8String ?: "(no label)");
++        for (NSString *signpost in info.debugSignposts)
++          fprintf(stderr, "[gpu-first-metal-signpost] %s\n", signpost.UTF8String);
++      }
++      fflush(stderr);
++    }
++  }];
+   [(id<MTLCommandBuffer>)params->handle commit];
+   return STATUS_SUCCESS;
+ }

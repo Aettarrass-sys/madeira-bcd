@@ -33,6 +33,8 @@ jobs:
         run: |
           git -C research/dxmt apply --check "$GITHUB_WORKSPACE/.github/patches/dxmt-gpu-first-error.patch"
           git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-gpu-first-error.patch"
+          git -C research/dxmt apply --check "$GITHUB_WORKSPACE/.github/patches/dxmt-first-metal-error.patch"
+          git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-first-metal-error.patch"
           git -C research/dxmt diff --check
 
       - name: Require the matching private converter package
