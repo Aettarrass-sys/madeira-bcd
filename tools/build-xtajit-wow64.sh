@@ -25,6 +25,8 @@ git -C "$SOURCE" submodule update --init --recursive --depth 1
 # insufficient: a stale committed DLL had the same nominal FEX snapshot.
 grep -q 'std::atomic<uint64_t> IRCapRIP' "$SOURCE/FEXCore/Source/Interface/IR/PassManager.cpp"
 grep -q 'mrs %0, TPIDRRO_EL0' "$SOURCE/FEXCore/Source/Utils/AllocWatch.cpp"
+grep -q 'IosWowSyscallEntry' "$SOURCE/Source/Windows/WOW64/Module.cpp"
+grep -q 'IosSweepRegisterThreadEx' "$SOURCE/Source/Windows/WOW64/Module.cpp"
 cp "$ROOT/tools/fex-wow64-crt-ios.cpp" "$SOURCE/Source/Windows/Common/CRT/CRT_iOS.cpp"
 
 cmake -S "$SOURCE" -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \

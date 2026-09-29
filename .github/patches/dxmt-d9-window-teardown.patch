@@ -1,0 +1,367 @@
+diff --git a/src/d3d9/unix/d3d9_native_glue.cpp b/src/d3d9/unix/d3d9_native_glue.cpp
+index 76451e8..05558d0 100644
+--- a/src/d3d9/unix/d3d9_native_glue.cpp
++++ b/src/d3d9/unix/d3d9_native_glue.cpp
+@@ -11,7 +11,7 @@
+  *     a wild dereference.  It is also the IDENTITY map: one handle per
+  *     native object, find-before-create, which is what makes
+  *     GetSurfaceLevel(n) twice return the same guest pointer;
+- *   - the per-guest-process root and d3d9_native_process_teardown(), which
++ *   - the per-guest-process root and d3d9_native_window_teardown(), which
+  *     section 8.9-5 calls the MOST IMPORTANT risk in the whole plan -- native
+  *     objects hold host pointers INTO the arena, i.e. into the 4 GB range
+  *     ios_wow_reclaim_dead_windows() is about to replace with PROT_NONE;
+@@ -69,11 +69,6 @@
+ 
+ #include <unistd.h>
+ 
+-/* B for an explicit pseudo-process, 0 when that process has no window.
+- * Resolved at app link time from build/ntdll-unix/virtual_ios.c, the same way
+- * ios_wow_base() is (see d3d9_unix_glue.h). */
+-extern "C" unsigned long ios_wow_base_for_peb(void *peb_id);
+-
+ /* Defined at the bottom of this file, beside the [d3d9-native-census]
+  * summary; called from d3d9_native_init(), which is far above it. */
+ extern "C" void d3d9_native_census_configure(void);
+@@ -214,6 +209,23 @@ free_list_insert(ArenaChunk &chunk, uint64_t offset, uint64_t size) {
+ 
+ } // namespace
+ 
++/* The guest-window base B of the pseudo-process a call is made for: the
++ * calling thread's, or the pinned arena root on a DXMT worker pthread, which
++ * has none (the same rule the handle table uses).  Per-window records are
++ * tagged with it so that d3d9_native_window_teardown() drops exactly the dead
++ * process's records and leaves a second live 32-bit process's alone.  Never
++ * called with the arena lock held. */
++static unsigned long
++caller_window_base() {
++  unsigned long base = ios_wow_base();
++  if (!base) {
++    Arena &a = arena();
++    std::lock_guard<std::mutex> guard(a.mutex);
++    base = a.root;
++  }
++  return base;
++}
++
+ /* ======================================================================
+  * The arena's public face
+  * ====================================================================== */
+@@ -529,7 +541,7 @@ guest_page_size() {
+  * fault its SEH can never see (section 8.9-4).
+  *
+  * Every entry records the window base of the pseudo-process that created it,
+- * which is what makes the per-process sweep in d3d9_native_process_teardown
++ * which is what makes the per-process sweep in d3d9_native_window_teardown
+  * possible at all.
+  * ====================================================================== */
+ 
+@@ -778,20 +790,37 @@ d3d9_native_init(void) {
+   return 1;
+ }
+ 
+-/* Called from ios_wow_reclaim_dead_windows() BEFORE the PROT_NONE replace and
+- * before ios_jit_purge_window().  The order below IS the contract of section
+- * 8.9-5, and it is asserted by construction rather than by comment:
++namespace {
++void forget_window_states_of(unsigned long base);
++}
++
++/* Called from ios_wow_reclaim_dead_windows() with the dead window's base B,
++ * BEFORE the PROT_NONE replace and before ios_jit_purge_window().  The order
++ * below IS the contract of section 8.9-5, and it is asserted by construction
++ * rather than by comment:
+  *
+  *   1. drop every native object this pseudo-process created -- that is what
+  *      releases the Metal objects, and their destructors are the last thing
+  *      that may touch arena memory;
+  *   2. drop the arena chunks, so no host pointer into the window survives;
+- *   3. drop the window's entry in the client-size cache;
++ *   3. drop this process's per-window records (client sizes, window states);
++ *
++ * and only then does the caller remap the range.
+  *
+- * and only then does the caller remap the range. */
++ * Keyed by the window base, not by the PEB.  The first version took the dead
++ * PEB and looked its base up through ios_wow_base_for_peb(), but by the time
++ * the reclaim runs the window registry has already marked the slot dead
++ * (ios_wow_window_mark_released clears its PEB and the reclaim sets dead=2),
++ * and that lookup skips dead slots by design -- so it always answered 0 and
++ * this function returned before doing anything: every native object, every
++ * Metal object behind it and every arena record of an exited 32-bit process
++ * leaked, still pointing into a range that was then remapped PROT_NONE and
++ * handed to the next process.  The caller already holds B; it passes it.
++ *
++ * Idempotent: a second call for the same B (a reclaim that had to retry the
++ * remap) finds nothing left to drop. */
+ void
+-d3d9_native_process_teardown(void *peb) {
+-  unsigned long base = ios_wow_base_for_peb(peb);
++d3d9_native_window_teardown(unsigned long base) {
+   if (!base)
+     return;
+ 
+@@ -869,8 +898,9 @@ d3d9_native_process_teardown(void *peb) {
+     }
+   }
+ 
+-  /* 3. window sizes */
+-  dxmt::wsi::madeira_forget_all_windows();
++  /* 3. this process's per-window records */
++  forget_window_states_of(base);
++  dxmt::wsi::madeira_forget_windows_of(base);
+ }
+ 
+ /* ======================================================================
+@@ -967,7 +997,7 @@ void
+ madeira_window_enter_fullscreen(HWND window, uint32_t width, uint32_t height) {
+   /* Record the size the frontend believes the window has, so a later
+    * getWindowSize() agrees with the swapchain it just built. */
+-  wsi::madeira_set_client_size(window, width, height);
++  wsi::madeira_set_client_size(window, width, height, caller_window_base());
+   log_once("window seam: enter_fullscreen is a no-op until the shim lands (8.2(d))");
+ }
+ 
+@@ -999,7 +1029,7 @@ madeira_window_minimize(HWND window) {
+ 
+ void
+ madeira_window_reposition(HWND window, uint32_t width, uint32_t height) {
+-  wsi::madeira_set_client_size(window, width, height);
++  wsi::madeira_set_client_size(window, width, height, caller_window_base());
+   log_once("window seam: reposition is a no-op until the shim lands (8.2(d))");
+ }
+ 
+@@ -1027,7 +1057,7 @@ madeira_window_is_visible(HWND window) {
+ 
+ namespace {
+ 
+-bool g_census_on = true;
++bool g_census_on = false;
+ unsigned g_census_interval = 5000;
+ 
+ std::atomic<uint32_t> g_census_calls[D3D9SHIM_OP_COUNT];
+@@ -1048,8 +1078,8 @@ void census_report(); /* below d3d9_native_gen.inc: it names the op table */
+  * thread separately.  The census summary cannot: it only prints on a Present
+  * cadence, and a title that dies during device init never presents at all.
+  *
+- * Always-on: a per-thread last opcode, printed by the teardown line and by
+- * every census summary.  MADEIRA_D3D9_TRACE=1 additionally prints one
++ * Enabled only during diagnostics: a per-thread last opcode, printed by the
++ * teardown line and by each census summary. MADEIRA_D3D9_TRACE=1 prints one
+  * [d3d9-last] line per crossing, which is what bisects a guest-side fault to
+  * the call that preceded it. */
+ bool g_trace_on = false;
+@@ -1061,6 +1091,8 @@ void trace_line(unsigned op); /* below: it names the op table */
+ 
+ inline void
+ census_tick(unsigned op) {
++  if (!g_trace_on && !g_census_on)
++    return;
+   g_last_op = op;
+   g_last_seq++;
+   g_last_op_any.store(op, std::memory_order_relaxed);
+@@ -1099,6 +1131,7 @@ struct WindowState {
+   uint32_t width;
+   uint32_t height;
+   uint32_t flags;
++  unsigned long owner = 0; /* guest-window base of the process that reported it */
+ };
+ 
+ std::mutex &
+@@ -1113,6 +1146,14 @@ window_states() {
+   return map;
+ }
+ 
++/* d3d9_native_window_teardown step 3: a dead process's HWNDs may be reused by
++ * the next process, so their records must not outlive it. */
++void
++forget_window_states_of(unsigned long base) {
++  std::lock_guard<std::mutex> guard(window_mutex());
++  std::erase_if(window_states(), [base](const auto &entry) { return entry.second.owner == base; });
++}
++
+ /* The BehaviorFlags the application passed, as opposed to the ones the native
+  * device was built with.  CreateDevice strips D3DCREATE_MULTITHREADED because
+  * the shim owns that lock (8.2(d): the native device is constructed
+@@ -1290,11 +1331,13 @@ d3d9_native_window_state(HWND hwnd, uint32_t width, uint32_t height, uint32_t fl
+ 
+     /* A NULL hwnd sets the default every window with no entry of its own
+      * falls back to, which is what madeira_set_client_size already means. */
++    const unsigned long owner = caller_window_base();
+     if (width && height)
+-      dxmt::wsi::madeira_set_client_size(hwnd, width, height);
++      dxmt::wsi::madeira_set_client_size(hwnd, width, height, owner);
+     if (hwnd) {
+       std::lock_guard<std::mutex> guard(window_mutex());
+       WindowState &state = window_states()[hwnd];
++      state.owner = owner;
+       if (width && height) {
+         state.width = width;
+         state.height = height;
+@@ -1356,13 +1399,14 @@ static void
+ seed_window_size(HWND window, const D3DPRESENT_PARAMETERS *parameters) {
+   if (!window || !parameters || !parameters->BackBufferWidth || !parameters->BackBufferHeight)
+     return;
++  const unsigned long owner = caller_window_base();
+   std::lock_guard<std::mutex> guard(window_mutex());
+   if (window_states().count(window))
+     return; /* the shim has already said what this window really is */
+   window_states()[window] =
+-      WindowState{parameters->BackBufferWidth, parameters->BackBufferHeight, 0u};
++      WindowState{parameters->BackBufferWidth, parameters->BackBufferHeight, 0u, owner};
+   dxmt::wsi::madeira_set_client_size(window, parameters->BackBufferWidth,
+-                                     parameters->BackBufferHeight);
++                                     parameters->BackBufferHeight, owner);
+ }
+ 
+ static void
+@@ -1578,8 +1622,8 @@ census_report() {
+   if (!g_census_seq)
+     std::fprintf(stderr,
+                  "[d3d9-native-census] armed: %u slots, summaries at present "
+-                 "1/100/1000 then every %u (MADEIRA_D3D9_NATIVE_CENSUS=0 "
+-                 "disables, MADEIRA_D3D9_NATIVE_CENSUS_EVERY overrides)\n",
++                 "1/100/1000 then every %u (MADEIRA_D3D9_NATIVE_CENSUS=1 "
++                 "enables, MADEIRA_D3D9_NATIVE_CENSUS_EVERY overrides)\n",
+                  (unsigned)D3D9SHIM_OP_COUNT, g_census_interval);
+   g_census_seq++;
+ 
+@@ -1630,10 +1674,11 @@ d3d9_native_census_configure(void) {
+   const char *off = std::getenv("MADEIRA_D3D9_NATIVE_CENSUS");
+   const char *every = std::getenv("MADEIRA_D3D9_NATIVE_CENSUS_EVERY");
+ 
+-  if (off
+-      && (!std::strcmp(off, "0") || !std::strcmp(off, "off") || !std::strcmp(off, "no")
+-          || !std::strcmp(off, "false")))
+-    g_census_on = false;
++  const char *diag = std::getenv("MADEIRA_DIAG");
++  g_census_on = (diag && !std::strcmp(diag, "1"));
++  if (off)
++    g_census_on = !std::strcmp(off, "1") || !std::strcmp(off, "on")
++               || !std::strcmp(off, "yes") || !std::strcmp(off, "true");
+   if (every) {
+     long value = std::strtol(every, nullptr, 10);
+     if (value > 0)
+diff --git a/src/d3d9/unix/d3d9_native_hooks.h b/src/d3d9/unix/d3d9_native_hooks.h
+index 74134b8..65778d8 100644
+--- a/src/d3d9/unix/d3d9_native_hooks.h
++++ b/src/d3d9/unix/d3d9_native_hooks.h
+@@ -67,10 +67,10 @@ extern "C" {
+ 
+ /* Called once, from _d3d9_init, after the hash handshake passes. */
+ extern int d3d9_native_init(void);
+-/* Called from ios_wow_reclaim_dead_windows() BEFORE the PROT_NONE replace
+- * and before ios_jit_purge_window() -- native objects hold host pointers
+- * INTO the arena (8.9-5). */
+-extern void d3d9_native_process_teardown(void *peb);
++/* Called from ios_wow_reclaim_dead_windows() with the dead window's base B,
++ * BEFORE the PROT_NONE replace and before ios_jit_purge_window() -- native
++ * objects hold host pointers INTO the arena (8.9-5). */
++extern void d3d9_native_window_teardown(unsigned long window_base);
+ 
+ /* One hook per vtable slot.  The glue implements these against MTLD3D9* in
+  * step 4; `local` slots are listed too, so the table below is total and a
+diff --git a/src/d3d9shim/gen_d3d9_thunks.py b/src/d3d9shim/gen_d3d9_thunks.py
+index 6182786..9fa2233 100644
+--- a/src/d3d9shim/gen_d3d9_thunks.py
++++ b/src/d3d9shim/gen_d3d9_thunks.py
+@@ -1162,10 +1162,10 @@ extern "C" {
+     o.append("""
+ /* Called once, from _d3d9_init, after the hash handshake passes. */
+ extern int d3d9_native_init(void);
+-/* Called from ios_wow_reclaim_dead_windows() BEFORE the PROT_NONE replace
+- * and before ios_jit_purge_window() -- native objects hold host pointers
+- * INTO the arena (8.9-5). */
+-extern void d3d9_native_process_teardown(void *peb);
++/* Called from ios_wow_reclaim_dead_windows() with the dead window's base B,
++ * BEFORE the PROT_NONE replace and before ios_jit_purge_window() -- native
++ * objects hold host pointers INTO the arena (8.9-5). */
++extern void d3d9_native_window_teardown(unsigned long window_base);
+ 
+ /* One hook per vtable slot.  The glue implements these against MTLD3D9* in
+  * step 4; `local` slots are listed too, so the table below is total and a
+diff --git a/src/util/wsi_window_madeira.cpp b/src/util/wsi_window_madeira.cpp
+index ed65d43..3e08acd 100644
+--- a/src/util/wsi_window_madeira.cpp
++++ b/src/util/wsi_window_madeira.cpp
+@@ -45,6 +45,7 @@ namespace {
+ struct ClientSize {
+   uint32_t width;
+   uint32_t height;
++  unsigned long owner; /* guest-window base of the reporting process */
+ };
+ 
+ /* A plain std::mutex, not dxmt::mutex: the map is touched once per
+@@ -63,20 +64,20 @@ cache() {
+   return map;
+ }
+ 
+-ClientSize g_default = {1024, 768};
++ClientSize g_default = {1024, 768, 0};
+ 
+ } // namespace
+ 
+ void
+-madeira_set_client_size(HWND window, uint32_t width, uint32_t height) {
++madeira_set_client_size(HWND window, uint32_t width, uint32_t height, unsigned long owner) {
+   if (!width || !height)
+     return;
+   std::lock_guard<std::mutex> guard(cache_mutex());
+   if (!window) {
+-    g_default = {width, height};
++    g_default = {width, height, 0};
+     return;
+   }
+-  cache()[window] = {width, height};
++  cache()[window] = {width, height, owner};
+ }
+ 
+ void
+@@ -84,7 +85,7 @@ madeira_set_default_client_size(uint32_t width, uint32_t height) {
+   if (!width || !height)
+     return;
+   std::lock_guard<std::mutex> guard(cache_mutex());
+-  g_default = {width, height};
++  g_default = {width, height, 0};
+ }
+ 
+ void
+@@ -94,9 +95,9 @@ madeira_forget_window(HWND window) {
+ }
+ 
+ void
+-madeira_forget_all_windows() {
++madeira_forget_windows_of(unsigned long owner) {
+   std::lock_guard<std::mutex> guard(cache_mutex());
+-  cache().clear();
++  std::erase_if(cache(), [owner](const auto &entry) { return entry.second.owner == owner; });
+ }
+ 
+ void
+diff --git a/src/util/wsi_window_madeira.hpp b/src/util/wsi_window_madeira.hpp
+index 29d79bc..552b211 100644
+--- a/src/util/wsi_window_madeira.hpp
++++ b/src/util/wsi_window_madeira.hpp
+@@ -38,13 +38,16 @@ namespace dxmt::wsi {
+ 
+ /* Called by the unix glue whenever the shim reports a window's client size.
+  * A width or height of 0 is rejected: a zero-sized swapchain is never what
+- * the caller meant, and the last good size is a better answer than one. */
+-void madeira_set_client_size(HWND window, uint32_t width, uint32_t height);
+-
+-/* Drop one window's entry (device teardown), or every entry belonging to a
+- * dead guest process (d3d9_native_process_teardown). */
++ * the caller meant, and the last good size is a better answer than one.
++ * `owner` is the guest-window base of the reporting process, so a process
++ * teardown can drop exactly its own entries. */
++void madeira_set_client_size(HWND window, uint32_t width, uint32_t height, unsigned long owner = 0);
++
++/* Drop one window's entry (device teardown), or every entry reported by the
++ * dead guest process whose window base is `owner`
++ * (d3d9_native_window_teardown). */
+ void madeira_forget_window(HWND window);
+-void madeira_forget_all_windows();
++void madeira_forget_windows_of(unsigned long owner);
+ 
+ /* The fallback used when a window has no cached size yet -- the virtual
+  * desktop the app is presented into.  Set once at init from the same place

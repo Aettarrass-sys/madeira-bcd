@@ -9920,7 +9920,7 @@ static int ios_wow_window_teardown( ULONG_PTR base, void *dead_peb, unsigned gua
  * and hold HOST POINTERS INTO THE ARENA — i.e. into the very 4 GB range the
  * teardown below is about to replace with PROT_NONE.  Dropping them has to
  * happen first, and the call site below is what asserts that order. */
-extern void d3d9_native_process_teardown( void *peb );
+extern void d3d9_native_window_teardown( unsigned long window_base );
 extern int ios_thread_registry_range_busy( uintptr_t base, uintptr_t size );
 
 static void ios_wow_reclaim_dead_windows(void)
@@ -9982,12 +9982,10 @@ static void ios_wow_reclaim_dead_windows(void)
             }
         }
 
-        /* BEFORE the PROT_NONE replace and before ios_jit_purge_window(),
-         * both of which happen inside ios_wow_window_teardown(): the order is
-         * arena pointers dropped, then Metal objects, then the remap (§8.9-5).
-         * Keyed by the same PEB the window registry is, so a second live
-         * 32-bit process keeps its own objects. */
-        d3d9_native_process_teardown( dead_peb );
+        /* The slot is already marked dead, so looking up its PEB would fail.
+         * Use the base captured before marking it dead. Native D3D9 drops only
+         * this window's objects before the PROT_NONE remap. */
+        d3d9_native_window_teardown( (unsigned long)base );
 
         if (!ios_wow_window_teardown( base, dead_peb, guard_owned ))
         {

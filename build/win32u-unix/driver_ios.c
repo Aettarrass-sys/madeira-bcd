@@ -151,6 +151,24 @@ void winios_drv_post_mouse(int x, int y, unsigned int flags, unsigned int mouse_
     }
 }
 
+/* Wine's VK-to-scan table can return the numpad scan for a dedicated arrow
+ * or navigation VK. The app sends numpad keys with their distinct VKs, so
+ * these ten VKs need the E0 prefix even when the scan lacks it. */
+static UINT winios_key_extended_flag( UINT vk, UINT scan, int nav_e0 )
+{
+    if (scan & 0xe000) return KEYEVENTF_EXTENDEDKEY;
+    if (!nav_e0) return 0;
+    switch (vk)
+    {
+    case VK_PRIOR: case VK_NEXT: case VK_END: case VK_HOME:
+    case VK_LEFT: case VK_UP: case VK_RIGHT: case VK_DOWN:
+    case VK_INSERT: case VK_DELETE:
+        return KEYEVENTF_EXTENDEDKEY;
+    }
+    return 0;
+}
+/* end winios_key_extended_flag */
+
 /* Keyboard sibling of winios_drv_post_key: packages an INPUT_KEYBOARD
  * event. vk is a Windows virtual-key code (VK_RETURN=0x0D, VK_SPACE=0x20,
  * VK_ESCAPE=0x1B, ...); flags is 0 for key-down, KEYEVENTF_KEYUP (0x2)
@@ -161,6 +179,7 @@ void winios_drv_post_key(unsigned short vk, unsigned int flags)
     INPUT input = {0};
     NTSTATUS st;
     UINT scan;
+    static int nav_e0 = -1;
 
     /* ml647: DERIVE THE SCAN CODE. This used to hardcode wScan = 0 while the
      * comment above claimed it was "derived via the default layout" — the
@@ -179,12 +198,16 @@ void winios_drv_post_key(unsigned short vk, unsigned int flags)
      * W/A/S/D were delivered, accepted with STATUS_SUCCESS, and then discarded
      * as unidentifiable. That is why the on-screen stick moved nothing.
      *
-     * MAPVK_VK_TO_VSC_EX returns 0xE0xx for the extended keys — arrows, the nav
-     * cluster, right ctrl/alt, numpad enter and divide. Those MUST carry
-     * KEYEVENTF_EXTENDEDKEY, or a scan-code reader sees the numpad twin
-     * instead: without E0, "up arrow" is numpad 8. */
+     * MAPVK_VK_TO_VSC_EX returns 0xE0xx for some extended keys; for the
+     * dedicated navigation keys Wine may return the numpad twin instead.
+     * Both cases need KEYEVENTF_EXTENDEDKEY for raw-input readers. */
     scan = NtUserMapVirtualKeyEx( vk, MAPVK_VK_TO_VSC_EX, NtUserGetKeyboardLayout(0) );
-    if (scan & 0xe000) flags |= KEYEVENTF_EXTENDEDKEY;
+    if (nav_e0 < 0)
+    {
+        const char *e = getenv( "MADEIRA_NAV_KEYS_E0" );
+        nav_e0 = !(e && e[0] == '0');
+    }
+    flags |= winios_key_extended_flag( vk, scan, nav_e0 );
 
     input.type           = INPUT_KEYBOARD;
     input.ki.wVk         = vk;

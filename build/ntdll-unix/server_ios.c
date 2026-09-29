@@ -5323,7 +5323,12 @@ void process_exit_wrapper( int status )
             ios_exe_win_mark_ready( dead_peb );
         }
     }
-    else close( fd_socket );
+    else
+    {
+        extern void wine_launched_process_did_exit( int status ) __attribute__((weak));
+        if (wine_launched_process_did_exit) wine_launched_process_did_exit( status );
+        close( fd_socket );
+    }
 #else
     close( fd_socket );
 #endif

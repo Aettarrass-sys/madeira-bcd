@@ -125,10 +125,15 @@ int madsync_enabled(void)
     static int state = -1;
     if (state < 0)
     {
+        char value[32];
+        int configured = madeira_cfg_get( "inproc-sync", value, sizeof(value) );
         int on = madeira_cfg_bool( "inproc-sync", 0 );   /* off by default: the fastsync cells own the in-process wait path; madeira.cfg inproc-sync = 1 opts in */
         state = on;
         dprintf( 2, "[madsync] ml1058 in-process synchronisation %s (madeira.cfg inproc-sync = 1 enables; fastsync is the default)\n",
                  on ? "ENABLED" : "disabled" );
+        dprintf( 2, "[madsync] cfg=%s dir=%s inproc-sync=%s\n",
+                 madeira_cfg_present() ? "present" : "absent", madeira_cfg_dir_source(),
+                 configured ? value : "unset" );
     }
     return state;
 }

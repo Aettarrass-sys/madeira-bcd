@@ -1,4 +1,5 @@
 #pragma once
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,6 +13,12 @@ int wine_process_start(const char *prefix_path);
 
 // Check if Wine process is running
 int wine_process_is_running(void);
+
+/* The initial program's NTSTATUS, when it terminates with a failure status.
+ * Child processes launched from explorer are reported in their session log. */
+void wine_launched_process_did_exit(int status);
+void wine_exit_status_reset(void);
+int wine_crash_exit_status(uint32_t *status);
 
 // Steam S0 net-test VPN gate: write C:\madeira-continue.flag into the
 // prefix's drive_c so the paused winhttp-test.exe resumes to the Steam

@@ -438,6 +438,36 @@ extern void wine_log_set_file(const char *path);
 
 static pthread_t g_wine_thread;
 static int g_wine_running = 0;
+static uint64_t g_launch_exit = 0;
+void wine_launched_process_did_exit(int status)
+{
+    if ((uint32_t)status >= 0xc0000000u)
+        __atomic_store_n(&g_launch_exit, (UINT64_C(1) << 32) | (uint32_t)status, __ATOMIC_RELEASE);
+}
+void wine_exit_status_reset(void) { __atomic_store_n(&g_launch_exit, 0, __ATOMIC_RELEASE); }
+int wine_crash_exit_status(uint32_t *status)
+{
+    uint64_t value = __atomic_load_n(&g_launch_exit, __ATOMIC_ACQUIRE);
+    if (!(value >> 32)) return 0;
+    if (status) *status = (uint32_t)value;
+    return 1;
+}
+/* wineserver may read madeira.cfg before the guest thread reaches its usual
+ * Documents setup. Capture the app container while HOME still names it. */
+static const char *g_madeira_docs_early = "unset";
+__attribute__((constructor)) static void madeira_docs_dir_early(void)
+{
+    char docs[PATH_MAX];
+    const char *home = getenv("CFFIXED_USER_HOME");
+    const char *existing = getenv("MADEIRA_DOCS_DIR");
+    if (existing && *existing) { g_madeira_docs_early = "existing"; return; }
+    if (!madeira_cfg__early_docs_enabled())
+    { g_madeira_docs_early = "disabled"; return; }
+    if (!home || !*home) home = getenv("HOME");
+    if (!home || !*home || snprintf(docs, sizeof(docs), "%s/Documents", home) >= (int)sizeof(docs))
+    { g_madeira_docs_early = "no-container-home"; return; }
+    if (setenv("MADEIRA_DOCS_DIR", docs, 0) == 0) g_madeira_docs_early = "set";
+}
 static char *g_prefix_path = NULL;
 
 /***********************************************************************
@@ -826,6 +856,8 @@ static void *wine_process_thread(void *arg) {
             LOG("Wine log file: %{public}s", logPath.UTF8String);
             /* Expose the app Documents dir to Wine code (e.g. for fex-jit-dump.bin) */
             setenv("MADEIRA_DOCS_DIR", docs.UTF8String, 1);
+            dprintf(STDERR_FILENO, "[config-dir] early=%s source=%s\n",
+                    g_madeira_docs_early, madeira_cfg_dir_source());
 
             /* ml1076: file-backed memory canary (Astra's memory-backing-canary.c,
              * run in-app on the phone, gated by Documents/madeira-swap-canary.txt).
@@ -1878,6 +1910,7 @@ int wine_process_start(const char *prefix_path) {
         LOG("Wine process already running");
         return 0;
     }
+    wine_exit_status_reset();
 
     if (g_prefix_path) free(g_prefix_path);
     g_prefix_path = strdup(prefix_path);

@@ -2703,6 +2703,10 @@ struct ContentView: View {
             }
             let wineElapsed = CFAbsoluteTimeGetCurrent() - pollStart
             logStore.log("Wine finished after \(String(format: "%.1f", wineElapsed))s")
+            var exitStatus: UInt32 = 0
+            if wine_crash_exit_status(&exitStatus) != 0 {
+                logStore.log(String(format: "Launched Wine program exited with NTSTATUS 0x%08X", exitStatus), level: .error)
+            }
 
             // Step 5: Resume UI + os_log, give main thread time to recover before detach
             DispatchQueue.main.async {

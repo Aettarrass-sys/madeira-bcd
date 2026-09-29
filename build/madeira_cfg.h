@@ -50,11 +50,34 @@ static void madeira_cfg__trim(char *s)
     if (i) memmove(s, s + i, n - i + 1);
 }
 
-/* Directory that holds the configuration: $MADEIRA_DOCS_DIR, else $HOME/Documents. */
+/* Prefer the stable app container while Wine temporarily changes HOME to its
+ * prefix on another thread. The constructor exports MADEIRA_DOCS_DIR earlier,
+ * but CFFIXED_USER_HOME also covers readers that run before that export. */
+static int madeira_cfg__early_docs_enabled(void)
+{
+    const char *setting = getenv("MADEIRA_CFG_EARLY_DOCS");
+    return !setting || strcmp(setting, "0");
+}
+
+static const char *madeira_cfg_dir_source(void)
+{
+    const char *v = getenv("MADEIRA_DOCS_DIR");
+    if (v && *v) return "env";
+    v = getenv("CFFIXED_USER_HOME");
+    if (v && *v && madeira_cfg__early_docs_enabled())
+        return "container";
+    v = getenv("HOME");
+    return v && *v ? "home" : "none";
+}
+
 static int madeira_cfg__dir(char *out, size_t cap)
 {
     const char *docs = getenv("MADEIRA_DOCS_DIR");
     if (docs && *docs) { if (strlen(docs) >= cap) return 0; strcpy(out, docs); return 1; }
+    docs = getenv("CFFIXED_USER_HOME");
+    if (docs && *docs && madeira_cfg__early_docs_enabled() && strlen(docs) + 11 < cap) {
+        strcpy(out, docs); strcat(out, "/Documents"); return 1;
+    }
     docs = getenv("HOME");
     if (!docs || !*docs || strlen(docs) + 11 >= cap) return 0;
     strcpy(out, docs); strcat(out, "/Documents");
