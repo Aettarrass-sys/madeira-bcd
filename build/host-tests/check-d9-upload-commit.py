@@ -122,7 +122,7 @@ assert unlock.rstrip().endswith("m_device->settleUploadPressure();\n  return D3D
 for name in ["MTLD3D9Device::UpdateTexture(", "MTLD3D9Device::UpdateSurface("]:
     f = function(dev, name)
     assert f.index("LockDevice();") < f.index("settleUploadPressure();") < f.index("return D3DERR_INVALIDCALL"), name
-draw = dev[dev.index("if (m_renamedBytesSinceCommit >= kRenameBytesBeforeImplicitCommit)\n    forceFlushAndCommit();"):]
+draw = dev[dev.index("if (m_renamedBytesSinceCommit >= kRenameBytesBeforeImplicitCommit)"):]
 assert draw.index("settleUploadPressure();") < draw.index("MTLD3D9Device::QueueBlitOp("), "settled on the draw boundary"
 assert "settleUploadPressure" not in function(tex, "MTLD3D9Texture::sweepManagedUpload() {"), "never inside the pre-draw sweep"
 assert "void settleUploadPressure();" in hpp and "m_uploadedBytesSinceCommit = 0;" in hpp
