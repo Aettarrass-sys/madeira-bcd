@@ -1,0 +1,151 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index a3721ab..49a4467 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -2609,11 +2609,6 @@ MTLD3D9Device::Reset(D3DPRESENT_PARAMETERS *pPresentationParameters) {
+     LogPresentRequest("Reset", *pPresentationParameters, D3DERR_INVALIDCALL);
+     return D3DERR_INVALIDCALL;
+   }
+-  // MADEIRA: the accepted request, logged once the extent/format are the
+-  // realized ones. A Reset that fails further down (the losable-resource gate)
+-  // still shows here as the mode that was asked for.
+-  LogPresentRequest("Reset", *pPresentationParameters, D3D_OK);
+-
+   // Spec gate: non-Ex devices reject Reset when any app-held
+   // D3DPOOL_DEFAULT resource or state block is still alive. wined3d
+   // device.c runs reset_enum_callback only on !extended; DXVK
+@@ -2623,6 +2618,14 @@ MTLD3D9Device::Reset(D3DPRESENT_PARAMETERS *pPresentationParameters) {
+   // expected to succeed Reset with live DEFAULT resources; the runtime
+   // drops those resources via internal release rather than failing.
+   if (!m_isEx && m_losableResourceCount.load(std::memory_order_relaxed) != 0) {
++    static std::atomic<unsigned> failureLogs{0};
++    unsigned n = failureLogs.fetch_add(1, std::memory_order_relaxed);
++    if (n < 8) {
++      Logger::warn(str::format("[d3d9-reset] rejected: ",
++          m_losableResourceCount.load(std::memory_order_relaxed),
++          " live DEFAULT-pool public references"));
++      LogPresentRequest("Reset", *pPresentationParameters, D3DERR_INVALIDCALL);
++    }
+     m_deviceState.store(DeviceState::NotReset, std::memory_order_relaxed);
+     return D3DERR_INVALIDCALL;
+   }
+@@ -2670,6 +2673,9 @@ MTLD3D9Device::Reset(D3DPRESENT_PARAMETERS *pPresentationParameters) {
+       pPresentationParameters->hDeviceWindow ? pPresentationParameters->hDeviceWindow : m_creationParams.hFocusWindow;
+   HRESULT hr = m_implicitSwapChain->ResetForDeviceReset(*pPresentationParameters, effectiveWindow);
+   if (FAILED(hr)) {
++    static std::atomic<unsigned> failureLogs{0};
++    if (failureLogs.fetch_add(1, std::memory_order_relaxed) < 8)
++      LogPresentRequest("Reset", *pPresentationParameters, hr);
+     // Non-Ex only: an Ex device never enters NotReset (wine/DXVK gate the store
+     // on !extended), so a failed ResetEx returns the error and leaves the
+     // device presentable rather than silently occluding Present.
+@@ -2765,6 +2771,9 @@ MTLD3D9Device::Reset(D3DPRESENT_PARAMETERS *pPresentationParameters) {
+   // edge-detection baseline.
+   m_fullscreenOccluded.store(false, std::memory_order_relaxed);
+   m_lastForegroundSample.store(wsi::foregroundWindow(), std::memory_order_relaxed);
++  static std::atomic<unsigned> successLogs{0};
++  if (successLogs.fetch_add(1, std::memory_order_relaxed) < 8)
++    LogPresentRequest("Reset", *pPresentationParameters, D3D_OK);
+   return D3D_OK;
+ }
+ 
+diff --git a/src/d3d9shim/d3d9shim_custom.c b/src/d3d9shim/d3d9shim_custom.c
+index 874939e..309389f 100644
+--- a/src/d3d9shim/d3d9shim_custom.c
++++ b/src/d3d9shim/d3d9shim_custom.c
+@@ -202,6 +202,7 @@ custom_reset(IDirect3DDevice9Ex *iface, D3DPRESENT_PARAMETERS *parameters,
+         return D3DERR_INVALIDCALL;
+ 
+     d3d9shim_lock(dev);
++    d3d9shim_device_prune_unreferenced_implicit(dev);
+     hr = d3d9shim_flush(dev);
+     if (FAILED(hr)) {
+         d3d9shim_unlock(dev);
+diff --git a/src/d3d9shim/d3d9shim_object.c b/src/d3d9shim/d3d9shim_object.c
+index caece21..2b9bda2 100644
+--- a/src/d3d9shim/d3d9shim_object.c
++++ b/src/d3d9shim/d3d9shim_object.c
+@@ -677,6 +677,9 @@ d3d9shim_obj_from_native(unsigned int kind, uint64_t handle)
+     impl = d3d9shim_obj_lookup(handle);
+     if (impl) {
+         obj = &impl->o.hdr;
++        /* COM out-interface methods return a new native reference. The
++         * existing wrapper owns one already; its public count is guest-side. */
++        obj_native_release(impl);
+         obj_addref_locked(obj);
+         table_unlock();
+         return obj;
+@@ -853,9 +856,13 @@ adopt_child(struct d3d9shim_object *container, unsigned int kind,
+     if (!handle)
+         return NULL;
+     impl = d3d9shim_obj_lookup(handle);
+-    if (impl)
++    if (impl) {
++        /* Each native Get* call AddRefs the returned interface. An existing
++         * wrapper already owns its original native ref, so balance this
++         * duplicate before adding another private cache reference. */
++        obj_native_release(impl);
+         child = &impl->o.hdr;
+-    else {
++    } else {
+         impl = obj_alloc_nolock(kind, handle, container,
+                                   D3D9SHIM_F_DEVICE_CHILD | extra_flags);
+         if (!impl)
+@@ -1383,6 +1390,44 @@ d3d9shim_shadow_apply(struct d3d9shim_device *dev, unsigned int op,
+     table_unlock();
+ }
+ 
++/* A resolved implicit child owns one native public reference even after its
++ * guest public count returns to zero. The cache normally releases that native
++ * reference on a successful Reset, but native non-Ex Reset rejects it as a
++ * live DEFAULT-pool object before it can succeed. Drop only unowned cache
++ * entries first; guest-held wrappers retain their identity and native ref. */
++void
++d3d9shim_device_prune_unreferenced_implicit(struct d3d9shim_device *dev)
++{
++    unsigned int i, j;
++
++    if (!dev)
++        return;
++    table_lock();
++    for (i = 0; i < D3D9SHIM_MAX_SWAPCHAINS; i++) {
++        struct d3d9shim_object *sc = dev->swapchains[i];
++
++        if (!sc)
++            continue;
++        for (j = 0; j < D3D9SHIM_MAX_BACK_BUFFERS; j++) {
++            struct d3d9shim_object *bb = D3D9SHIM_IMPL(sc)->o.swapchain.back_buffers[j];
++
++            if (bb && !bb->refcount)
++                drop_child(&D3D9SHIM_IMPL(sc)->o.swapchain.back_buffers[j]);
++        }
++        if (!sc->refcount)
++            drop_child(&dev->swapchains[i]);
++    }
++    for (i = 0; i < D3D_MAX_SIMULTANEOUS_RENDERTARGETS; i++) {
++        struct d3d9shim_object *rt = dev->render_targets[i];
++
++        if (rt && !rt->refcount)
++            drop_child(&dev->render_targets[i]);
++    }
++    if (dev->depth_stencil && !dev->depth_stencil->refcount)
++        drop_child(&dev->depth_stencil);
++    table_unlock();
++}
++
+ /* Reset destroys and recreates the implicit swapchain and its back buffers,
+  * so every cached child identity is stale.  Dropping the cache's private
+  * references is what lets the next GetSwapChain / GetBackBuffer resolve fresh
+diff --git a/src/d3d9shim/d3d9shim_object.h b/src/d3d9shim/d3d9shim_object.h
+index 7fb788b..cae6beb 100644
+--- a/src/d3d9shim/d3d9shim_object.h
++++ b/src/d3d9shim/d3d9shim_object.h
+@@ -165,6 +165,8 @@ void  d3d9shim_obj_release_private(struct d3d9shim_object *obj);
+ void  d3d9shim_obj_note_call(unsigned int op, const void *block);
+ /* Reset invalidates every cached implicit child identity. */
+ void  d3d9shim_device_invalidate_children(struct d3d9shim_device *dev);
++/* Release cached implicit native references that have no guest owner before Reset. */
++void  d3d9shim_device_prune_unreferenced_implicit(struct d3d9shim_device *dev);
+ struct d3d9shim_device_extra *d3d9shim_extra(struct d3d9shim_device *dev);
+ const void *d3d9shim_kind_vtbl(unsigned int kind);
+ 
