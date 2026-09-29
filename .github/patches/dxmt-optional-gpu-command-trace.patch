@@ -1,0 +1,148 @@
+diff --git a/src/winemetal/unix/winemetal_unix.c b/src/winemetal/unix/winemetal_unix.c
+index fbc7d0e..c27beae 100644
+--- a/src/winemetal/unix/winemetal_unix.c
++++ b/src/winemetal/unix/winemetal_unix.c
+@@ -419,10 +419,29 @@ static _Atomic int g_madeira_first_metal_error_logged;
+ static char g_madeira_gpu_trace_key;
+ static char g_madeira_gpu_encoder_trace_key;
+ 
++/* The detailed first-error ring allocates NSStrings and updates dictionaries
++ * for every Metal command. Keep command-buffer error reporting active, but
++ * require an explicit opt-in for this costly per-command forensic trace. */
++static _Atomic int g_madeira_gpu_trace_mode = -1;
++static int madeira_gpu_trace_on(void) {
++  int mode = atomic_load_explicit(&g_madeira_gpu_trace_mode, memory_order_relaxed);
++  if (mode < 0) {
++    const char *value = getenv("DXMT_GPU_COMMAND_TRACE");
++    const int selected = value && value[0] == '1';
++    int expected = -1;
++    if (atomic_compare_exchange_strong_explicit(&g_madeira_gpu_trace_mode, &expected,
++                                                selected, memory_order_relaxed, memory_order_relaxed))
++      fprintf(stderr, "[gpu-command-trace] %s (DXMT_GPU_COMMAND_TRACE=1 enables full trace)\n",
++              selected ? "enabled" : "disabled");
++    mode = atomic_load_explicit(&g_madeira_gpu_trace_mode, memory_order_relaxed);
++  }
++  return mode == 1;
++}
++
+ static void
+ madeira_gpu_trace_encoder(id<MTLCommandBuffer> buffer, id<MTLCommandEncoder> encoder,
+                           const char *kind, NSString *details) {
+-  if (!encoder) return;
++  if (!encoder || !madeira_gpu_trace_on()) return;
+   uint64_t serial = atomic_fetch_add_explicit(&g_madeira_gpu_encoder_serial, 1, memory_order_relaxed) + 1;
+   NSString *label = [NSString stringWithFormat:@"%@ enc=%llu %s %@",
+                      buffer.label ?: @"Madeira cb=?", (unsigned long long)serial, kind,
+@@ -438,6 +457,7 @@ madeira_gpu_trace_encoder(id<MTLCommandBuffer> buffer, id<MTLCommandEncoder> enc
+ 
+ static void
+ madeira_gpu_trace_command(id<MTLCommandEncoder> encoder, NSString *operation) {
++  if (!madeira_gpu_trace_on()) return;
+   NSMutableDictionary *record = objc_getAssociatedObject(encoder, &g_madeira_gpu_encoder_trace_key);
+   if (!record) return;
+   unsigned long long count = [record[@"count"] unsignedLongLongValue] + 1;
+@@ -464,8 +484,9 @@ _MTLCommandQueue_commandBuffer(void *obj) {
+   if (buffer) {
+     uint64_t serial = atomic_fetch_add_explicit(&g_madeira_gpu_buffer_serial, 1, memory_order_relaxed) + 1;
+     buffer.label = [NSString stringWithFormat:@"Madeira cb=%llu", (unsigned long long)serial];
+-    objc_setAssociatedObject(buffer, &g_madeira_gpu_trace_key,
+-                             [NSMutableDictionary dictionary], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
++    if (madeira_gpu_trace_on())
++      objc_setAssociatedObject(buffer, &g_madeira_gpu_trace_key,
++                               [NSMutableDictionary dictionary], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+   }
+   params->ret = (obj_handle_t)buffer;
+   return STATUS_SUCCESS;
+@@ -1397,13 +1418,15 @@ _MTLCommandBuffer_renderCommandEncoder(void *obj) {
+   descriptor.visibilityResultBuffer = (id<MTLBuffer>)info->visibility_buffer;
+ 
+   params->ret = (obj_handle_t)[(id<MTLCommandBuffer>)params->handle renderCommandEncoderWithDescriptor:descriptor];
+-  NSString *attachment = [NSString stringWithFormat:@"target=%ux%u c0=%p depth=%p sample=%u",
+-                          info->render_target_width, info->render_target_height,
+-                          (void *)(uintptr_t)info->colors[0].texture,
+-                          (void *)(uintptr_t)info->depth.texture,
+-                          info->default_raster_sample_count];
+-  madeira_gpu_trace_encoder((id<MTLCommandBuffer>)params->handle,
+-                            (id<MTLCommandEncoder>)params->ret, "render", attachment);
++  if (madeira_gpu_trace_on()) {
++    NSString *attachment = [NSString stringWithFormat:@"target=%ux%u c0=%p depth=%p sample=%u",
++                            info->render_target_width, info->render_target_height,
++                            (void *)(uintptr_t)info->colors[0].texture,
++                            (void *)(uintptr_t)info->depth.texture,
++                            info->default_raster_sample_count];
++    madeira_gpu_trace_encoder((id<MTLCommandBuffer>)params->handle,
++                              (id<MTLCommandEncoder>)params->ret, "render", attachment);
++  }
+ 
+   /* Count realized native passes, including clears and the final present.
+    * No new PE ABI or emulated hot-path counters are needed. */
+@@ -1998,8 +2021,9 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
+   }
+   wmt_census_batch(next, 2);
+   id<MTLBlitCommandEncoder> encoder = (id<MTLBlitCommandEncoder>)params->encoder;
++  const int trace_commands = madeira_gpu_trace_on();
+   while (next) {
+-    if (next->type != WMTBlitCommandCopyFromBufferToTexture)
++    if (trace_commands && next->type != WMTBlitCommandCopyFromBufferToTexture)
+       madeira_gpu_trace_command(encoder,
+           [NSString stringWithFormat:@"blit opcode=%u", (unsigned)next->type]);
+     switch ((enum WMTBlitCommandType)next->type) {
+@@ -2023,15 +2047,17 @@ _MTLBlitCommandEncoder_encodeCommands(void *obj) {
+       if (!texture_upload_pitch_ok(dst, body->size.width, body->bytes_per_row))
+         break;
+       wmt_stale_check(body->src, "blit copy src"); wmt_stale_check(body->dst, "blit copy dst");
+-      id<MTLBuffer> src = (id<MTLBuffer>)body->src;
+-      madeira_gpu_trace_command(encoder, [NSString stringWithFormat:
+-          @"buffer-to-texture src=%p len=%llu offset=%llu row=%u image=%u size=%ux%ux%u dst=%p tex=%lux%lux%lu fmt=%lu storage=%lu slice=%u level=%u origin=%u,%u,%u",
+-          (void *)src, (unsigned long long)src.length,
+-          (unsigned long long)body->src_offset, body->bytes_per_row, body->bytes_per_image,
+-          body->size.width, body->size.height, body->size.depth, (void *)dst,
+-          (unsigned long)dst.width, (unsigned long)dst.height, (unsigned long)dst.depth,
+-          (unsigned long)dst.pixelFormat, (unsigned long)dst.storageMode,
+-          body->slice, body->level, body->origin.x, body->origin.y, body->origin.z]);
++      if (trace_commands) {
++        id<MTLBuffer> src = (id<MTLBuffer>)body->src;
++        madeira_gpu_trace_command(encoder, [NSString stringWithFormat:
++            @"buffer-to-texture src=%p len=%llu offset=%llu row=%u image=%u size=%ux%ux%u dst=%p tex=%lux%lux%lu fmt=%lu storage=%lu slice=%u level=%u origin=%u,%u,%u",
++            (void *)src, (unsigned long long)src.length,
++            (unsigned long long)body->src_offset, body->bytes_per_row, body->bytes_per_image,
++            body->size.width, body->size.height, body->size.depth, (void *)dst,
++            (unsigned long)dst.width, (unsigned long)dst.height, (unsigned long)dst.depth,
++            (unsigned long)dst.pixelFormat, (unsigned long)dst.storageMode,
++            body->slice, body->level, body->origin.x, body->origin.y, body->origin.z]);
++      }
+       /* Validate the physical Metal layout before the GPU can read outside
+        * the source. In particular BC3 remapped to RGBA8 needs 4 MB for a
+        * 1024x1024 level even though its compressed source was only 1 MB. */
+@@ -2215,9 +2241,11 @@ _MTLComputeCommandEncoder_encodeCommands(void *obj) {
+   wmt_census_batch(next, 1);
+   id<MTLComputeCommandEncoder> encoder = (id<MTLComputeCommandEncoder>)params->encoder;
+   MTLSize threadgroup_size = {0, 0, 0};
++  const int trace_commands = madeira_gpu_trace_on();
+   while (next) {
+-    madeira_gpu_trace_command(encoder,
+-        [NSString stringWithFormat:@"compute opcode=%u", (unsigned)next->type]);
++    if (trace_commands)
++      madeira_gpu_trace_command(encoder,
++          [NSString stringWithFormat:@"compute opcode=%u", (unsigned)next->type]);
+     switch ((enum WMTComputeCommandType)next->type) {
+     default:
+       assert(!next->type && "unhandled compute command type");
+@@ -2374,7 +2402,9 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
+   wmt_shadow_batch(next);
+   wmt_census_batch(next, 0);
+   id<MTLRenderCommandEncoder> encoder = (id<MTLRenderCommandEncoder>)params->encoder;
++  const int trace_commands = madeira_gpu_trace_on();
+   while (next) {
++    if (trace_commands) {
+     NSString *operation = [NSString stringWithFormat:@"render opcode=%u", (unsigned)next->type];
+     switch ((enum WMTRenderCommandType)next->type) {
+     case WMTRenderCommandSetVertexBuffer:
+@@ -2416,6 +2446,7 @@ _MTLRenderCommandEncoder_encodeCommands(void *obj) {
+     madeira_gpu_trace_command(encoder, operation);
+     if (next->type == WMTRenderCommandDraw || next->type == WMTRenderCommandDrawIndexed)
+       [encoder insertDebugSignpost:operation];
++    }
+     switch ((enum WMTRenderCommandType)next->type) {
+     default:
+       assert(!next->type && "unhandled render command type");
