@@ -1,0 +1,66 @@
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index a3721ab..f9da31a 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -565,6 +565,7 @@ MTLD3D9Device::MTLD3D9Device(
+     m_anisotropyLimit = static_cast<uint32_t>(std::stoi(filtering));
+   Logger::warn(str::format("[d9-batching] ml1250 enabled=", m_batchScenes,
+                           " max-ops=256 anisotropy-limit=", m_anisotropyLimit));
++  Logger::info("[d9-pass-buffer-access] per-encoder vertex/index dependency dedup active");
+   // Match Windows D3D9 float behaviour on the app's creating thread before any
+   // device work; D3DCREATE_FPU_PRESERVE opts out (wined3d / DXVK gate the same).
+   if (!(behaviorFlags & D3DCREATE_FPU_PRESERVE))
+@@ -8111,17 +8112,17 @@ EmitCommonRenderSetup_d9(
+     // Nothing writes these allocations on the GPU, so the read has no
+     // counterpart to order against, and a refresh renames rather than
+     // overwriting a name a recorded draw already froze. Only override (UP)
+-    // streams
+-    // carry no tracked allocation and skip this; the per-encoder fence set
+-    // collapses repeats within an encoder and retainAllocation dedups within
+-    // the chunk. Runs before the resident dedup so a new encoder after a copy
+-    // re-establishes the dependency.
++    // streams carry no tracked allocation and skip this. ChunkEmitState is
++    // reset for each new render encoder, so a copy/blit followed by a render
++    // pass still registers the first read dependency. A repeated handle in
++    // the same pass is the same immutable allocation and needs no second
++    // access or residency command.
++    if (s.vs_resident[slot] == h)
++      continue;
+     if (auto *vb_alloc = res.resolved_vb_dxmt[slot].ptr())
+       ctx.access<true>(
+           res.resolved_vb_dxmt[slot], 0, static_cast<unsigned>(vb_alloc->length()), DXMT_ENCODER_RESOURCE_ACESS_READ
+       );
+-    if (s.vs_resident[slot] == h)
+-      continue;
+     auto &cmd = ctx.encodeRenderCommand<wmtcmd_render_useresource>();
+     cmd.type = WMTRenderCommandUseResource;
+     cmd.resource = h;
+@@ -8130,10 +8131,15 @@ EmitCommonRenderSetup_d9(
+     s.vs_resident[slot] = h;
+   }
+   // Same Vertex-stage read dependency for the index buffer (either map mode).
+-  if (auto *ib_alloc = res.resolved_ib_dxmt.ptr())
++  // The allocation captured by a draw cannot be GPU-written while this render
++  // pass is open. Register it once per encoder, then keep the existing draw
++  // bindings and ordering for every draw that uses it.
++  if (auto *ib_alloc = res.resolved_ib_dxmt.ptr(); ib_alloc && s.ib_access != ib_alloc) {
+     ctx.access<true>(
+         res.resolved_ib_dxmt, 0, static_cast<unsigned>(ib_alloc->length()), DXMT_ENCODER_RESOURCE_ACESS_READ
+     );
++    s.ib_access = ib_alloc;
++  }
+ 
+   // PSO bind.
+   if (s.pso != res.resolved_pso) {
+diff --git a/src/d3d9/d3d9_device.hpp b/src/d3d9/d3d9_device.hpp
+index f77f25a..064529f 100644
+--- a/src/d3d9/d3d9_device.hpp
++++ b/src/d3d9/d3d9_device.hpp
+@@ -1056,6 +1056,7 @@ public:
+     obj_handle_t frag_tex[16] = {};
+     obj_handle_t frag_smp[16] = {};
+     obj_handle_t vs_resident[D3D9_MAX_VERTEX_STREAMS] = {};
++    class dxmt::BufferAllocation *ib_access = nullptr;
+     // Shadow of (dxmt::Texture wrapper, view key) pair per PS stage.
+     // ctx.access<Pixel>() registers fence dependency and resolves view
+     // handle; idempotent within encoder so skip re-access on same (wrapper,

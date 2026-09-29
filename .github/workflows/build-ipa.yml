@@ -47,6 +47,8 @@ jobs:
           git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-encode-detail.patch"
           git -C research/dxmt apply --check "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-direct-texture-residency.patch"
           git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-direct-texture-residency.patch"
+          git -C research/dxmt apply --check "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-pass-buffer-access-dedup.patch"
+          git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-pass-buffer-access-dedup.patch"
           git -C research/dxmt apply --check "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-early-draw-commit.patch"
           git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-early-draw-commit.patch"
           git -C research/dxmt apply --check "$GITHUB_WORKSPACE/.github/patches/dxmt-optional-gpu-command-trace.patch"
@@ -1227,7 +1229,8 @@ jobs:
           grep -a -q 'queue-avg-us=' "$app/i386-windows/d3d9-emulated.dll"
           grep -a -q '\[d9-target-detail\]' "$app/i386-windows/d3d9-emulated.dll"
           grep -a -q '\[d9-target-fine\]' "$app/i386-windows/d3d9-emulated.dll"
-          echo "::notice::AppIcon and emulated D3D9 queue timing are in the archived app"
+          grep -a -q '\[d9-pass-buffer-access\]' "$app/i386-windows/d3d9-emulated.dll"
+          echo "::notice::AppIcon, D3D9 timing, and per-encoder buffer access dedup are in the archived app"
 
       # A device run reached DXMT and died there:
       #   err: Failed to create metal view, it seems like your Wine has no
