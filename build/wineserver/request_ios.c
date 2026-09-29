@@ -473,7 +473,8 @@ int receive_fd( struct process *process )
                          thread->id, data.fd, fd );
             /* ml586: log pipe/socket receipts — these are thread comm fds; the
              * pid field catches deliveries arriving on the wrong master socket */
-            if (fd != -1 && !fstat( fd, &fdt_st ) && (S_ISFIFO(fdt_st.st_mode) || S_ISSOCK(fdt_st.st_mode)))
+            if (getenv("MADEIRA_DIAG") && getenv("MADEIRA_DIAG")[0] == '1' &&
+                fd != -1 && !fstat( fd, &fdt_st ) && (S_ISFIFO(fdt_st.st_mode) || S_ISSOCK(fdt_st.st_mode)))
                 fprintf( stderr, "[srv-own] receive_fd tid=%04x pid=%04x client_fd=%d server_dup=%d kind=%s rev=ml586\n",
                          thread->id, process->id, data.fd, fd,
                          S_ISFIFO(fdt_st.st_mode) ? "fifo" : "sock" );

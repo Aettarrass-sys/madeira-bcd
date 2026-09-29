@@ -1583,6 +1583,9 @@ NTSTATUS WINAPI NtCreateThreadEx( HANDLE *handle, ACCESS_MASK access, OBJECT_ATT
      * routine (2026-07-07 [exit-stk]) — log every creation with the start
      * address's copy attribution to catch the creator red-handed. */
     {
+        extern int madeira_diag_on( void );
+        if (madeira_diag_on())
+        {
         extern void *ios_jit_pool_copy_owner(const void *addr, void **pe_base_out);
         extern void *ios_jit_current_peb(void);
         extern unsigned long long ios_jit_module_base_for_va(unsigned long long va, unsigned long long *size_out);
@@ -1624,6 +1627,7 @@ NTSTATUS WINAPI NtCreateThreadEx( HANDLE *handle, ACCESS_MASK access, OBJECT_ATT
                     }
                 }
             }
+        }
         }
     }
 

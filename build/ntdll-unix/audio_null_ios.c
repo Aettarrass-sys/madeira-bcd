@@ -1197,6 +1197,12 @@ static void ios_engine_teardown(void) {
  * three clients is the broken one" is the first question every one of these
  * reports raises and the per-call counters cannot answer it. */
 static void ios_report_streams(void) {
+    static int diagnostics = -1;
+    if (diagnostics < 0) {
+        const char *value = getenv("MADEIRA_DIAG");
+        diagnostics = value && value[0] == '1';
+    }
+    if (!diagnostics) return;
     static uint64_t last_mach;
     static const char *kind_name[] = { "u8", "s16", "s24", "s32", "f32" };
     uint64_t now = mach_absolute_time();

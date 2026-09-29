@@ -1763,7 +1763,8 @@ uintptr_t ios_srv_game_teb = 0;           /* set once by server_init_process_don
 #include "ios_frame_stats.h"
 #include <mach/mach_time.h>
 
-int ios_frame_stats_on = 1;               /* MADEIRA_FRAME_STATS=0 */
+extern int madeira_diag_on( void );
+int ios_frame_stats_on = 0;               /* opt in with MADEIRA_DIAG=1 or MADEIRA_FRAME_STATS=1 */
 unsigned long long ios_frame_role_tid[IOS_FRAME_ROLE_MAX];
 
 struct ios_frame_acc
@@ -2044,7 +2045,9 @@ void ios_frame_stats_init(void)
     if (done) return;
     done = 1;
     e = getenv( "MADEIRA_FRAME_STATS" );
-    ios_frame_stats_on = (e && !strcmp( e, "0" )) ? 0 : 1;
+    /* Keep the counters and clock reads out of normal gameplay.  An explicit
+     * frame setting wins; otherwise the shared diagnostics switch enables it. */
+    ios_frame_stats_on = e ? (!strcmp( e, "1" ) ? 1 : 0) : madeira_diag_on();
     wine_log_write( "[frame] ml1050 %s - one critical-path line per heartbeat: what BOUNDS a "
                     "frame (presenting-thread CPU vs wait split by cause, encode thread, GPU "
                     "time, drawable acquire, limiter). MADEIRA_FRAME_STATS=0 disables",
@@ -3224,7 +3227,9 @@ void ios_perf_line( unsigned long long phys_mb, unsigned long long peak_mb,
              * delivered it.  MADEIRA_DIAG=1 turns on [late-wake], which says
              * WHICH object and how old the token was. */
             late_total = madeira_late_wake_peek( &late_rescued );
-            wine_log_write( "[perf] rev=ml1110 phys=%lluMB(peak %llu, comp %llu) srv=%llu/s "
+            if (getenv( "MADEIRA_PERF_STATS" ) &&
+                !strcmp( getenv( "MADEIRA_PERF_STATS" ), "1" ))
+                wine_log_write( "[perf] rev=ml1110 phys=%lluMB(peak %llu, comp %llu) srv=%llu/s "
                             "fastsync hit=%u miss=%u peek=%u sem_rel=%u sem_wait=%u "
                             "desync=%u lostwake=%u late=%u rescued=%u tick=%llums"
                             " - MADEIRA_DIAG=1 for the full reporters",

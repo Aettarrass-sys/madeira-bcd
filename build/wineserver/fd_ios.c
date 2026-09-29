@@ -1351,7 +1351,8 @@ void main_loop(void)
                 if (qdump_on < 0)
                 {
                     const char *d = getenv("MADEIRA_DESKTOP");
-                    qdump_on = (d && *d == '1');
+                    const char *diag = getenv("MADEIRA_DIAG");
+                    qdump_on = (d && *d == '1' && diag && *diag == '1');
                 }
                 if (qdump_on)
                 {

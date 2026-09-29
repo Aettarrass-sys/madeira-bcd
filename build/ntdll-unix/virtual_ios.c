@@ -996,7 +996,7 @@ static void *ios_pool_warmer_thread( void *arg )
                     static unsigned long long fast_peak;
                     unsigned long long mb = (unsigned long long)fvmi.phys_footprint >> 20;
                     ios_last_footprint_mb = mb;
-                    if (mb > fast_peak + 16)      /* only say something when it actually climbs */
+                    if (madeira_diag_on() && mb > fast_peak + 16)
                     {
                         fast_peak = mb;
                         dprintf( 2, "[footprint] rev=ml1060 fast phys=%llu MB compressed=%llu MB\n", mb,
@@ -1242,7 +1242,7 @@ static void *ios_pool_warmer_thread( void *arg )
                         ios_perf_comp_mb = (unsigned long long)vmi.compressed >> 20;
                     }
                     /* ml1520: every third heartbeat (30 s), who holds it */
-                    if (do_beat)
+                    if (do_beat && madeira_diag_on())
                     {
                         extern void ios_wow_window_census( unsigned long long footprint_mb );
                         static unsigned census_beats;
@@ -1254,6 +1254,7 @@ static void *ios_pool_warmer_thread( void *arg )
                      *   vm_allocate(task, &addr, size, 0x33000003)
                      * = ANYWHERE | PURGABLE | VM_MAKE_TAG(51), and the tag picks
                      * the address range. Four variants isolate tag vs purgable. */
+                    if (madeira_diag_on())
                     {
                         static kern_return_t last[4] = { -1, -1, -1, -1 };
                         static const int fl[4] = { 0x33000003, 0x33000001, 0x00000003, 0x00000001 };
@@ -1273,7 +1274,7 @@ static void *ios_pool_warmer_thread( void *arg )
                             if (kr[i] == KERN_SUCCESS) vm_deallocate( mach_task_self(), a[i], 0x19000 );
                         }
                     }
-                    dprintf(2, "[footprint] rev=ml358 phys=%llu MB (peak %llu) internal=%llu MB "
+                    if (madeira_diag_on()) dprintf(2, "[footprint] rev=ml358 phys=%llu MB (peak %llu) internal=%llu MB "
                             "compressed=%llu MB external=%llu MB reusable=%llu MB (cycle=%u)\n",
                             fp_mb, peak_mb,
                             (unsigned long long)vmi.internal >> 20,
@@ -1353,7 +1354,7 @@ static void *ios_pool_warmer_thread( void *arg )
              * a minute instead of once every ten seconds. The bracket widens
              * from ~10 s to ~60 s of log, which is still readable; the cost
              * drops by 6x. MADEIRA_DIAG=1 restores the 10 s cadence. */
-            if (do_beat && (madeira_diag_on() || (cycle % 6) == 0))
+            if (do_beat && madeira_diag_on())
             {
                 extern boolean_t malloc_zone_check( malloc_zone_t *zone );
                 static int zone_bad, zone_announced;
@@ -22301,6 +22302,7 @@ static UINT64 ios_vm_watch(void)
 static void ios_vm_note_alloc( void *base, SIZE_T size, ULONG type, ULONG protect,
                                UINT64 hint, UINT64 zbits, UINT64 lim )
 {
+    if (!madeira_diag_on()) return;
     UINT64 b = (UINT64)(ULONG_PTR)base, w = ios_vm_watch();
     int covers = (w && b <= w && w < b + size);
     /* ml959: a result ABOVE the caller's requested limit is a contract
@@ -22344,6 +22346,7 @@ static void ios_vm_note_alloc( void *base, SIZE_T size, ULONG type, ULONG protec
 
 static void ios_vm_note_free( void *base, SIZE_T size, ULONG type )
 {
+    if (!madeira_diag_on()) return;
     UINT64 b = (UINT64)(ULONG_PTR)base, w = ios_vm_watch();
     int hits = (w && b <= w && (size == 0 || w < b + size));
     if (b < 0x100000000ull) return;
@@ -25431,7 +25434,7 @@ NTSTATUS WINAPI NtProtectVirtualMemory( HANDLE process, PVOID *addr_ptr, SIZE_T 
      * Capped and sampled: import resolution alone issues hundreds of these at
      * start-up, and an uncapped log on a guest-driven path is how a 77 MB log
      * happened before.  First 48, then one in 256. */
-    if (view && (view->protect & SEC_IMAGE))
+    if (madeira_diag_on() && view && (view->protect & SEC_IMAGE))
     {
         static unsigned long vp_n, vp_hot;
         const unsigned long n = ++vp_n;

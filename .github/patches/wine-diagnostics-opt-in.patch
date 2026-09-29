@@ -1,0 +1,74 @@
+diff --git a/dlls/ntdll/unix/file.c b/dlls/ntdll/unix/file.c
+index 183dddc9..8cddf5d6 100644
+--- a/dlls/ntdll/unix/file.c
++++ b/dlls/ntdll/unix/file.c
+@@ -286,7 +286,8 @@ static pthread_mutex_t mnt_mutex = PTHREAD_MUTEX_INITIALIZER;
+  * notes at each cache.
+  */
+ 
+-#define IOS_FSA(v,n)  __atomic_fetch_add( &(v), (unsigned long long)(n), __ATOMIC_RELAXED )
++static int ios_fs_disabled(void);
++#define IOS_FSA(v,n)  do { if (!ios_fs_disabled()) __atomic_fetch_add( &(v), (unsigned long long)(n), __ATOMIC_RELAXED ); } while (0)
+ #define IOS_FSL(v)    __atomic_load_n( &(v), __ATOMIC_RELAXED )
+ 
+ enum ios_fs_op { IOS_OP_OPEN, IOS_OP_CREATE, IOS_OP_QATTR, IOS_OP_QFULL,
+@@ -337,6 +338,7 @@ static unsigned long long ios_fs_open_lk_fail_us;
+ static inline unsigned long long ios_fs_now_us(void)
+ {
+     struct timespec ts;
++    if (ios_fs_disabled()) return 0;
+     if (clock_gettime( CLOCK_MONOTONIC, &ts )) return 0;
+     return (unsigned long long)ts.tv_sec * 1000000ull + (unsigned long long)ts.tv_nsec / 1000;
+ }
+@@ -447,7 +449,8 @@ static int ios_fs_disabled(void)
+     if (v < 0)
+     {
+         const char *s = getenv( "MADEIRA_FSSTATS" );
+-        v = (s && s[0] == '0') ? 1 : 0;
++        const char *diag = getenv( "MADEIRA_DIAG" );
++        v = s ? (s[0] == '1' ? 0 : 1) : !(diag && diag[0] == '1');
+         __atomic_store_n( &ios_fs_off, v, __ATOMIC_RELAXED );
+     }
+     return v;
+diff --git a/server/event.c b/server/event.c
+index 33bcd14f..fce09582 100644
+--- a/server/event.c
++++ b/server/event.c
+@@ -824,6 +824,13 @@ static void ios_evt_stat( struct event *event, int op, unsigned int status, unsi
+ 
+ void ios_evt_record( void *obj, void *sync, int op, int state )
+ {
++    static int diagnostics = -1;
++    if (diagnostics < 0)
++    {
++        const char *value = getenv( "MADEIRA_DIAG" );
++        diagnostics = value && value[0] == '1';
++    }
++    if (!diagnostics) return;
+     struct ios_evt_rec *r = &ios_evt_ring[ios_evt_pos];
+ 
+     r->obj   = obj;
+diff --git a/server/thread.c b/server/thread.c
+index 85f50d5b..f47408d5 100644
+--- a/server/thread.c
++++ b/server/thread.c
+@@ -2096,7 +2096,8 @@ DECL_HANDLER(new_thread)
+ #ifdef WINE_IOS
+         /* ml586: which process a new thread gets filed under, and by whom —
+          * a misfiled thread dies with its false parent's teardown */
+-        fprintf( stderr, "[srv-own] new_thread tid=%04x pid=%04x requester=%04x request_unixfd=%d rev=ml586\n",
++        if (getenv("MADEIRA_DIAG") && getenv("MADEIRA_DIAG")[0] == '1')
++            fprintf( stderr, "[srv-own] new_thread tid=%04x pid=%04x requester=%04x request_unixfd=%d rev=ml586\n",
+                  thread->id, process->id, current->id, request_fd );
+ #endif
+         thread->system_regs = current->system_regs;
+@@ -2150,7 +2151,8 @@ static int init_thread( struct thread *thread, int reply_fd, int wait_fd )
+ 
+ #ifdef WINE_IOS
+     /* ml586: client fd number -> server-side dup number mapping per thread */
+-    fprintf( stderr, "[srv-own] init_thread tid=%04x pid=%04x reply=%d->srv%d wait=%d->srv%d rev=ml586\n",
++    if (getenv("MADEIRA_DIAG") && getenv("MADEIRA_DIAG")[0] == '1')
++        fprintf( stderr, "[srv-own] init_thread tid=%04x pid=%04x reply=%d->srv%d wait=%d->srv%d rev=ml586\n",
+              thread->id, thread->process->id, fdt_client_reply, reply_fd, fdt_client_wait, wait_fd );
+ #endif
+     thread->reply_fd = create_anonymous_fd( &thread_fd_ops, reply_fd, &thread->obj, 0 );

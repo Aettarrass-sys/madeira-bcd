@@ -65,6 +65,7 @@
 #ifdef WINE_IOS
 #include <os/log.h>
 #include <pthread.h>
+extern int madeira_diag_on( void );
 #endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(environ);
@@ -2609,6 +2610,7 @@ NTSTATUS WINAPI NtGetNlsSectionPtr( ULONG type, ULONG id, void *unknown, void **
      * init_locale is skipped and its casemap global stays null (the
      * upcase_unicode_to_utf8 fault). Match the child peb from the earlier
      * "[Wine child] child_peb=..." line. */
+    if (madeira_diag_on())
     {
         TEB *cur_teb = NtCurrentTeb();
         dprintf( 2, "[nls-getptr] type=%u id=%u peb=%p\n",

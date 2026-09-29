@@ -902,7 +902,17 @@ done:
  * says which one failed instead of leaving it to be inferred. Emitted from
  * the drain at most once a second, and only when something is actually
  * happening (queued work, held keys, or a non-zero drop count). */
+static BOOL winios_diag_on(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *value = getenv("MADEIRA_DIAG");
+        enabled = value && value[0] == '1';
+    }
+    return enabled != 0;
+}
+
 static void winios_q_report(unsigned int depth) {
+    if (!winios_diag_on()) return;
     static double next_at;
     double now = CACurrentMediaTime();
     unsigned int i, pushed, coalesced, hw, dm, dt, comp, keys, btns, rel;
@@ -1015,7 +1025,7 @@ BOOL winios_pProcessEvents(DWORD mask) {
     static unsigned int cnt;
     static int quiet = -1;
     if (quiet < 0) quiet = getenv("MADEIRA_QUIET") != NULL;
-    if ((cnt++ % 240) == 0 && !quiet) {
+    if ((cnt++ % 240) == 0 && !quiet && winios_diag_on()) {
         fprintf(stderr, "[winios] pProcessEvents called n=%u\n", cnt); fflush(stderr);
     }
     /* Desktop debugging: dump the full window tree every ~5s. Runs on
@@ -1031,7 +1041,8 @@ BOOL winios_pProcessEvents(DWORD mask) {
      * low-volume family rather than 30 lines every five seconds. */
     static unsigned direct_dumps;
     static double next_tree_dump;
-    if (desk || (direct_dumps < 3 && winios_overlay_window_count() > 0)) {
+    if (winios_diag_on() &&
+        (desk || (direct_dumps < 3 && winios_overlay_window_count() > 0))) {
         double now = CACurrentMediaTime();
         if (now >= next_tree_dump) {
             next_tree_dump = now + 5.0;

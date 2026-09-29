@@ -3390,12 +3390,13 @@ static void *ios_mach_exception_thread( void *arg )
                          * while its teb->peb is a child peb) is the
                          * cross-copy migration that kills thread exit. */
                         {
+                            extern int madeira_diag_on( void );
                             extern void *ios_jit_pool_copy_owner(const void *addr, void **pe_base_out);
                             /* Child threads only — the session's own boot
                              * takes thousands of these and drowned the
                              * budget (2026-07-07 run: all 128 entries spent
                              * before services.exe even spawned). */
-                            if (fault_owner_peb && peb && fault_owner_peb != (void *)peb)
+                            if (madeira_diag_on() && fault_owner_peb && peb && fault_owner_peb != (void *)peb)
                             {
                                 static volatile int xe_count = 0;
                                 int xe = __sync_add_and_fetch(&xe_count, 1);

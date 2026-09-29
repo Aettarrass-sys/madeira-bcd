@@ -214,8 +214,19 @@ void winios_drv_post_key(unsigned short vk, unsigned int flags)
  * title, style and rects. Driven from the app side (Winios.m
  * ProcessEvents drain) every few seconds in desktop mode — ground truth
  * for "does the taskbar exist / is it visible / where is it". */
+static int winios_diag_on(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *value = getenv("MADEIRA_DIAG");
+        enabled = value && value[0] == '1';
+    }
+    return enabled;
+}
+
 void winios_dump_window_tree(void)
 {
+    if (!winios_diag_on()) return;
     HWND list[128];
     ULONG size = ARRAY_SIZE(list), i;
     NTSTATUS status;
@@ -588,7 +599,7 @@ static int winios_overlay_diag_n( struct winios_diag_table *t, HWND hwnd, int ma
 {
     int i;
 
-    if (!winios_direct_overlay()) return 0;
+    if (!winios_diag_on() || !winios_direct_overlay()) return 0;
     for (i = 0; i < t->used && i < WINIOS_DIAG_SLOTS; i++)
         if (t->slot[i].hwnd == hwnd) return t->slot[i].n < max ? ++t->slot[i].n : 0;
     if (t->used >= WINIOS_DIAG_SLOTS) return 0;
@@ -945,7 +956,7 @@ static void winios_drv_window_pos_changed( HWND hwnd, HWND insert_after, HWND ow
      * insert_after names the z-order move; surface tells us which windows
      * share one. Skip empty rects (the 1x1 IME/message windows) so the
      * signal is not buried. */
-    if (!IsRectEmpty( &new_rects->visible ))
+    if (winios_diag_on() && !IsRectEmpty( &new_rects->visible ))
     {
         static unsigned pos_n;
         unsigned n = ++pos_n;
@@ -991,7 +1002,7 @@ static void winios_drv_window_pos_changed( HWND hwnd, HWND insert_after, HWND ow
      * clamps an empty rect up to the 128px minimum) and a zero-size Metal
      * layer. Degenerate rects are rare and always interesting, so log them
      * unconditionally, with the window rect and style that produced them. */
-    else
+    else if (winios_diag_on())
     {
         /* ml780: an empty visible rect fires constantly for ordinary
          * zero-size CHILD controls (e.g. a toolbar/rebar child window with

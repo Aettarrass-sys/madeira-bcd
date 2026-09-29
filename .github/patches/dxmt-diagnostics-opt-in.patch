@@ -1,0 +1,145 @@
+diff --git a/src/d3d9/d3d9_census.cpp b/src/d3d9/d3d9_census.cpp
+index 5cf3de8..99153bd 100644
+--- a/src/d3d9/d3d9_census.cpp
++++ b/src/d3d9/d3d9_census.cpp
+@@ -190,9 +190,10 @@ unsigned long long now_ms() {
+ 
+ bool readEnabled() {
+   std::string v = env::getEnvVar("MADEIRA_D3D9_CENSUS");
+-  /* Default ON: this is a measurement build stage, and a knob that has to be
+-   * set to get any data is a knob nobody sets. */
+-  return !(v == "0" || v == "off" || v == "no" || v == "false");
++  /* Normal play does not count every D3D9 call. The shared diagnostic switch
++   * or the dedicated census setting can re-enable this expensive path. */
++  return v == "1" || v == "on" || v == "yes" || v == "true" ||
++         (v.empty() && env::getEnvVar("MADEIRA_DIAG") == "1");
+ }
+ 
+ void line(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 9dd0dc1..cef4bb5 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -82,6 +82,12 @@ static_assert(kSbcMaxTextureUnits == D3D9_MAX_TEXTURE_UNITS, "");
+ 
+ namespace {
+ 
++// Profiling must not take clocks, retain command timing, or update counters
++// during normal play.  Both knobs are parsed once before the first D3D9 call.
++bool d9DiagnosticEnabled(const char *specific) {
++  return env::getEnvVar("MADEIRA_DIAG") == "1" || env::getEnvVar(specific) == "1";
++}
++
+ // SetTexture and UpdateTexture receive an app-owned IDirect3DBaseTexture9 and must
+ // not call through its vtable to identify it: a wrapped or hostile vtable (some
+ // overlays install one, and the conformance path for this deliberately corrupts it)
+@@ -977,7 +983,7 @@ void
+ MTLD3D9Device::commitCurrentChunkTimed(unsigned reason) {
+   // Device lock serializes callers. Report causes, not just GPU totals: an
+   // upload queue can also submit buffers independently of these chunks.
+-  static const bool stats = env::getEnvVar("DXMT_D9_SUBMIT_STATS") != "0";
++  static const bool stats = d9DiagnosticEnabled("DXMT_D9_SUBMIT_STATS");
+   if (stats) {
+     ++m_submitReasons[std::min(reason, 4u)];
+     if (++m_submitCount == 1 || !(m_submitCount % 512))
+@@ -1611,7 +1617,7 @@ MTLD3D9Device::waitForGpuOrDeviceError(uint64_t value) {
+ 
+ void
+ MTLD3D9Device::noteReadback(unsigned kind, const D3DSURFACE_DESC &desc) {
+-  static const bool enabled = env::getEnvVar("DXMT_D9_READBACK_STATS") != "0";
++  static const bool enabled = d9DiagnosticEnabled("DXMT_D9_READBACK_STATS");
+   if (!enabled)
+     return;
+   ++m_readbackKinds[std::min(kind, 3u)];
+@@ -4808,10 +4814,12 @@ static constexpr char madeira_d9_target_time_marker[] =
+ #endif
+ HRESULT STDMETHODCALLTYPE
+ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSurface9 *pDestSurface) {
++  static const bool timing_enabled = d9DiagnosticEnabled("DXMT_D9_TARGET_TIME");
+   static std::atomic<bool> timing_announced{false};
+-  if (!timing_announced.exchange(true, std::memory_order_relaxed))
++  if (timing_enabled && !timing_announced.exchange(true, std::memory_order_relaxed))
+     Logger::warn(madeira_d9_target_time_marker);
+-  const auto readback_start = std::chrono::steady_clock::now();
++  const auto readback_start = timing_enabled ? std::chrono::steady_clock::now()
++                                             : std::chrono::steady_clock::time_point{};
+   D3D9_CENSUS(D3D9_CENSUS_MTLD3D9Device_GetRenderTargetData);
+   D9DeviceLock lock = LockDevice();
+   // Wine main thread has no outer NSAutoreleasePool. GetRenderTargetData
+@@ -4872,6 +4880,11 @@ MTLD3D9Device::GetRenderTargetData(IDirect3DSurface9 *pRenderTarget, IDirect3DSu
+   // This is the synchronous path used by the 16x16 readback seen once per
+   // PTDE gameplay frame. Count each blocking stage without logging each call.
+   auto finishReadback = [&](uint64_t seq) -> HRESULT {
++    if (!timing_enabled) {
++      commitCurrentChunkTimed(3);
++      m_dxmtQueue->WaitCPUFence(seq);
++      return waitForGpuOrDeviceError(signal_seq) ? D3D_OK : D3DERR_DEVICELOST;
++    }
+     using clock = std::chrono::steady_clock;
+     auto us = [](clock::duration elapsed) -> uint64_t {
+       return (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+@@ -10932,7 +10945,7 @@ MTLD3D9Device::FlushDrawBatch() {
+             pso_ready = res.resolved_pso_task->GetDone();
+           }
+           if (!pso_ready) {
+-            static const bool wait_stats = env::getEnvVar("DXMT_D9_PIPELINE_STATS") != "0";
++            static const bool wait_stats = d9DiagnosticEnabled("DXMT_D9_PIPELINE_STATS");
+             const auto start = wait_stats ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+             res.resolved_pso_task->Wait();
+             if (wait_stats) {
+diff --git a/src/dxmt/dxmt_command_queue.cpp b/src/dxmt/dxmt_command_queue.cpp
+index 8e8ed11..8f9b700 100644
+--- a/src/dxmt/dxmt_command_queue.cpp
++++ b/src/dxmt/dxmt_command_queue.cpp
+@@ -86,7 +86,7 @@ CommandQueue::CommitCurrentChunk() {
+   auto& statistics = CurrentFrameStatistics();
+   statistics.command_buffer_count++;
+ #if ASYNC_ENCODING
+-  chunk.timing.ready = std::chrono::steady_clock::now();
++  if (chunk.timing.trace) chunk.timing.ready = std::chrono::steady_clock::now();
+   ready_for_encode.fetch_add(1, std::memory_order_release);
+   dxmt::atomic_notify_one(ready_for_encode);
+ 
+@@ -107,7 +107,7 @@ void
+ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
+ 
+   auto pool = WMT::MakeAutoreleasePool();
+-  chunk.timing.encode_start = std::chrono::steady_clock::now();
++  if (chunk.timing.trace) chunk.timing.encode_start = std::chrono::steady_clock::now();
+ 
+   switch (capture_state.getNextAction(chunk.frame_)) {
+   case CaptureState::NextAction::StartCapture: {
+@@ -157,7 +157,7 @@ CommandQueue::CommitChunkInternal(CommandChunk &chunk, uint64_t seq) {
+   }
+   if (chunk.timing.trace) chunk.timing.commit_start = std::chrono::steady_clock::now();
+   cmdbuf.commit();
+-  chunk.timing.encode_end = std::chrono::steady_clock::now();
++  if (chunk.timing.trace) chunk.timing.encode_end = std::chrono::steady_clock::now();
+ 
+   ready_for_commit.fetch_add(1, std::memory_order_release);
+   dxmt::atomic_notify_one(ready_for_commit);
+@@ -193,13 +193,13 @@ CommandQueue::WaitForFinishThread() {
+     if (stopped.load())
+       break;
+     auto &chunk = chunks[internal_seq % kCommandChunkCount];
+-    chunk.timing.finish_start = std::chrono::steady_clock::now();
++    if (chunk.timing.trace) chunk.timing.finish_start = std::chrono::steady_clock::now();
+     chunk.timing.already_complete =
+         chunk.attached_cmdbuf.status() > WMTCommandBufferStatusScheduled;
+     if (chunk.attached_cmdbuf.status() <= WMTCommandBufferStatusScheduled) {
+       chunk.attached_cmdbuf.waitUntilCompleted();
+     }
+-    chunk.timing.metal_complete = std::chrono::steady_clock::now();
++    if (chunk.timing.trace) chunk.timing.metal_complete = std::chrono::steady_clock::now();
+     const bool device_error = chunk.attached_cmdbuf.status() == WMTCommandBufferStatusError;
+     const bool first_device_error = device_error && !HasDeviceError();
+     completed_chunks_[completed_chunk_count_ % kGpuErrorHistory] = {
+@@ -247,7 +247,7 @@ CommandQueue::WaitForFinishThread() {
+       target->CompleteGpuWork(device_error ? GpuCompletionStatus::Failed : GpuCompletionStatus::Complete);
+ 
+     chunk.reset();
+-    chunk.timing.fence_signal = std::chrono::steady_clock::now();
++    if (chunk.timing.trace) chunk.timing.fence_signal = std::chrono::steady_clock::now();
+     chunk.timing.trace = false;
+     cpu_coherent.signal(internal_seq);
+     chunk_ongoing.fetch_sub(1, std::memory_order_release);
