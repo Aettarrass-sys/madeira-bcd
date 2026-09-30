@@ -50,60 +50,44 @@ index a3721ab..49a4467 100644
  }
  
 diff --git a/src/d3d9shim/d3d9shim_custom.c b/src/d3d9shim/d3d9shim_custom.c
-index 874939e..309389f 100644
+index 874939e..5ebcfc3 100644
 --- a/src/d3d9shim/d3d9shim_custom.c
 +++ b/src/d3d9shim/d3d9shim_custom.c
 @@ -202,6 +202,7 @@ custom_reset(IDirect3DDevice9Ex *iface, D3DPRESENT_PARAMETERS *parameters,
          return D3DERR_INVALIDCALL;
  
      d3d9shim_lock(dev);
-+    d3d9shim_device_prune_unreferenced_implicit(dev);
++    d3d9shim_device_prune_unreferenced_before_reset(dev);
      hr = d3d9shim_flush(dev);
      if (FAILED(hr)) {
          d3d9shim_unlock(dev);
 diff --git a/src/d3d9shim/d3d9shim_object.c b/src/d3d9shim/d3d9shim_object.c
-index caece21..2b9bda2 100644
+index caece21..a66e17e 100644
 --- a/src/d3d9shim/d3d9shim_object.c
 +++ b/src/d3d9shim/d3d9shim_object.c
-@@ -677,6 +677,9 @@ d3d9shim_obj_from_native(unsigned int kind, uint64_t handle)
-     impl = d3d9shim_obj_lookup(handle);
-     if (impl) {
-         obj = &impl->o.hdr;
-+        /* COM out-interface methods return a new native reference. The
-+         * existing wrapper owns one already; its public count is guest-side. */
-+        obj_native_release(impl);
-         obj_addref_locked(obj);
-         table_unlock();
-         return obj;
-@@ -853,9 +856,13 @@ adopt_child(struct d3d9shim_object *container, unsigned int kind,
-     if (!handle)
-         return NULL;
-     impl = d3d9shim_obj_lookup(handle);
--    if (impl)
-+    if (impl) {
-+        /* Each native Get* call AddRefs the returned interface. An existing
-+         * wrapper already owns its original native ref, so balance this
-+         * duplicate before adding another private cache reference. */
-+        obj_native_release(impl);
-         child = &impl->o.hdr;
--    else {
-+    } else {
-         impl = obj_alloc_nolock(kind, handle, container,
-                                   D3D9SHIM_F_DEVICE_CHILD | extra_flags);
-         if (!impl)
-@@ -1383,6 +1390,44 @@ d3d9shim_shadow_apply(struct d3d9shim_device *dev, unsigned int op,
+@@ -33,6 +33,7 @@
+  * dxguid and its import set stays KERNEL32/USER32/GDI32/api-ms-win-crt-*. */
+ #define INITGUID
+ 
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
+@@ -1383,6 +1384,89 @@ d3d9shim_shadow_apply(struct d3d9shim_device *dev, unsigned int op,
      table_unlock();
  }
  
-+/* A resolved implicit child owns one native public reference even after its
-+ * guest public count returns to zero. The cache normally releases that native
-+ * reference on a successful Reset, but native non-Ex Reset rejects it as a
-+ * live DEFAULT-pool object before it can succeed. Drop only unowned cache
-+ * entries first; guest-held wrappers retain their identity and native ref. */
++/* The native handle table owns one public reference per guest wrapper, even
++ * after its guest public count returns to zero. Native non-Ex Reset counts
++ * that reference as a live DEFAULT-pool object. Retire unowned cached wrappers
++ * before Reset; guest-held wrappers keep their identity and native handle. */
 +void
-+d3d9shim_device_prune_unreferenced_implicit(struct d3d9shim_device *dev)
++d3d9shim_device_prune_unreferenced_before_reset(struct d3d9shim_device *dev)
 +{
 +    unsigned int i, j;
++    unsigned int pruned = 0, held = 0;
++    static LONG reported;
++    char line[160];
 +
 +    if (!dev)
 +        return;
@@ -116,28 +100,71 @@ index caece21..2b9bda2 100644
 +        for (j = 0; j < D3D9SHIM_MAX_BACK_BUFFERS; j++) {
 +            struct d3d9shim_object *bb = D3D9SHIM_IMPL(sc)->o.swapchain.back_buffers[j];
 +
-+            if (bb && !bb->refcount)
++            if (bb && !bb->refcount) {
 +                drop_child(&D3D9SHIM_IMPL(sc)->o.swapchain.back_buffers[j]);
++                pruned++;
++            } else if (bb) held++;
 +        }
-+        if (!sc->refcount)
++        if (!sc->refcount) {
 +            drop_child(&dev->swapchains[i]);
++            pruned++;
++        } else held++;
 +    }
 +    for (i = 0; i < D3D_MAX_SIMULTANEOUS_RENDERTARGETS; i++) {
 +        struct d3d9shim_object *rt = dev->render_targets[i];
 +
-+        if (rt && !rt->refcount)
++        if (rt && !rt->refcount) {
 +            drop_child(&dev->render_targets[i]);
++            pruned++;
++        } else if (rt) held++;
 +    }
-+    if (dev->depth_stencil && !dev->depth_stencil->refcount)
-+        drop_child(&dev->depth_stencil);
++    if (dev->depth_stencil) {
++        if (!dev->depth_stencil->refcount) {
++            drop_child(&dev->depth_stencil);
++            pruned++;
++        } else held++;
++    }
++    /* Bound resources have a native public ref owned by their handle even
++     * when the application released its last guest ref. Native Reset counts
++     * that ref as a live DEFAULT resource. Its device binding still has an
++     * internal ref; Reset clears the binding on success, so retire only the
++     * wrapper's unowned cached ref here. */
++    for (i = 0; i < D3D9SHIM_MAX_TEXTURE_SLOTS; i++) {
++        struct d3d9shim_object *tex = dev->textures[i];
++
++        if (tex && !tex->refcount) {
++            drop_child(&dev->textures[i]);
++            pruned++;
++        } else if (tex) held++;
++    }
++    for (i = 0; i < D3D9_MAX_VERTEX_STREAMS; i++) {
++        struct d3d9shim_object *vb = dev->stream_buffers[i];
++
++        if (vb && !vb->refcount) {
++            drop_child(&dev->stream_buffers[i]);
++            pruned++;
++        } else if (vb) held++;
++    }
++    if (dev->index_buffer) {
++        if (!dev->index_buffer->refcount) {
++            drop_child(&dev->index_buffer);
++            pruned++;
++        } else held++;
++    }
 +    table_unlock();
++    if (!InterlockedCompareExchange(&reported, 1, 0)
++            && GetEnvironmentVariableA("MADEIRA_D3D9_NATIVE_CENSUS", NULL, 0)) {
++        snprintf(line, sizeof(line), "[d3d9-reset-cache] pruned=%u guest-held=%u",
++                 pruned, held);
++        d3d9shim_trace(line);
++    }
 +}
 +
  /* Reset destroys and recreates the implicit swapchain and its back buffers,
   * so every cached child identity is stale.  Dropping the cache's private
   * references is what lets the next GetSwapChain / GetBackBuffer resolve fresh
 diff --git a/src/d3d9shim/d3d9shim_object.h b/src/d3d9shim/d3d9shim_object.h
-index 7fb788b..cae6beb 100644
+index 7fb788b..bba151d 100644
 --- a/src/d3d9shim/d3d9shim_object.h
 +++ b/src/d3d9shim/d3d9shim_object.h
 @@ -165,6 +165,8 @@ void  d3d9shim_obj_release_private(struct d3d9shim_object *obj);
@@ -145,7 +172,7 @@ index 7fb788b..cae6beb 100644
  /* Reset invalidates every cached implicit child identity. */
  void  d3d9shim_device_invalidate_children(struct d3d9shim_device *dev);
 +/* Release cached implicit native references that have no guest owner before Reset. */
-+void  d3d9shim_device_prune_unreferenced_implicit(struct d3d9shim_device *dev);
++void  d3d9shim_device_prune_unreferenced_before_reset(struct d3d9shim_device *dev);
  struct d3d9shim_device_extra *d3d9shim_extra(struct d3d9shim_device *dev);
  const void *d3d9shim_kind_vtbl(unsigned int kind);
  
