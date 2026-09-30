@@ -1,4 +1,31 @@
-# Native D3D9 batch repair (next build after 0.1.38)
+# Native D3D9 batch integrity and recording synchronization
+
+## Follow-up: 0.1.39 hang
+
+The device log rejected batch 61994 with 84 operation references and 85
+payloads (11 draws, 22 blits, 52 reference updates). It was invalid at
+publication and encoding entry, with unchanged storage and fingerprint.
+The guard called `MarkDeviceError`, stopping rendering while the app remained
+responsive. This is containment, not a successful fix of the original writer.
+
+Source inspection found generated shim setters and getters making direct
+native calls outside the shim device lock. The previous native creation patch
+XORed `D3DCREATE_MULTITHREADED`, disabling native protection when the guest
+requested it. That assumption about shim lock coverage was incorrect.
+
+Both native `CreateDevice` and `CreateDeviceEx` now OR that flag, keeping the
+native recursive device lock enabled regardless of guest flags or diagnostic
+settings. The existing behavior-flags map still restores the original guest
+flags in `GetCreationParameters`. No new per-call logging is added.
+
+`check-d9-native-lock.py` reproduces a payload/reference split using ordered
+handshakes without undefined concurrent vector access, then exercises the
+production recursive lock and batch helper with four producers and a concurrent
+batch publisher. ASan/UBSan checks 160,000 operations across two rounds. Only
+Windows API and logging/environment dependencies are stubbed. The workflow runs
+this test after applying the full patch sequence. This verifies synchronization
+under the modeled interleaving; actual PTDE stability and lock overhead still
+need an iPhone run.
 
 ## Evidence and limits
 

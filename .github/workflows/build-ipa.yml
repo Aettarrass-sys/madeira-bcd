@@ -79,6 +79,7 @@ jobs:
           python3 build/host-tests/check-d9-upload-commit.py
           python3 build/host-tests/check-scene-batching.py
           CXX=clang++ python3 build/host-tests/check-d9-batch-stream.py
+          CXX=clang++ python3 build/host-tests/check-d9-native-lock.py
           CXX=clang++ bash build/dxmt-tests/build-bcn-host-test.sh
 
       - name: Require the matching private converter package

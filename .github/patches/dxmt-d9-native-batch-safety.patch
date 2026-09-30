@@ -16,11 +16,11 @@ index 76451e8..37438ac 100644
 - *     one of the 320 entry points, on the hot path, for a race the shim has
 - *     already serialised.  What the application passed is remembered so
 - *     GetCreationParameters still reports it.
-+ *  1. Exactly one device lock must protect the native D3D9 pending-op vectors.
-+ *     When the guest requested D3DCREATE_MULTITHREADED its shim lock covers
-+ *     calls, so clear the bit for DXMT. Otherwise give DXMT its own device
-+ *     lock: some games issue resource calls from workers even without the
-+ *     flag, and concurrent vector mutation corrupts PendingBlitOp references.
++ *  1. Always protect the native D3D9 device, regardless of guest flags.
++ *     Generated shim direct/fallback calls run outside its device lock;
++ *     the shim lock therefore cannot replace the native lock even when
++ *     the guest requested D3DCREATE_MULTITHREADED. Worker resource calls
++ *     must serialize with draw recording and batch publication.
 + *     The original flags are remembered for GetCreationParameters.
   *  2. The window-size cache is seeded.  The shim pushes the real client size
   *     on slot 322 before it calls, but a device created with a zero extent
@@ -30,7 +30,7 @@ index 76451e8..37438ac 100644
      IDirect3DDevice9 *created = nullptr;
      HRESULT hr = _self->CreateDevice(adapter_idx, device_type, focus_window,
 -                                     flags & ~(DWORD)D3DCREATE_MULTITHREADED,
-+                                     (flags ^ (DWORD)D3DCREATE_MULTITHREADED),
++                                     (flags | (DWORD)D3DCREATE_MULTITHREADED),
                                       parameters, &created);
      if (SUCCEEDED(hr) && created)
        remember_behavior_flags(
@@ -39,7 +39,7 @@ index 76451e8..37438ac 100644
       * only reads it; d3d9_api.py describes it as the input it is. */
      HRESULT hr = _self->CreateDeviceEx(adapter_idx, device_type, focus_window,
 -                                       flags & ~(DWORD)D3DCREATE_MULTITHREADED, parameters,
-+                                       (flags ^ (DWORD)D3DCREATE_MULTITHREADED), parameters,
++                                       (flags | (DWORD)D3DCREATE_MULTITHREADED), parameters,
                                         const_cast<D3DDISPLAYMODEEX *>(mode), &created);
      if (SUCCEEDED(hr) && created)
        remember_behavior_flags(static_cast<void *>(created), flags);
