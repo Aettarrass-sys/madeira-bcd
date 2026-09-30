@@ -1,0 +1,237 @@
+diff --git a/src/d3d9/d3d9_batch_stream.hpp b/src/d3d9/d3d9_batch_stream.hpp
+new file mode 100644
+index 0000000..d9cb1d4
+--- /dev/null
++++ b/src/d3d9/d3d9_batch_stream.hpp
+@@ -0,0 +1,89 @@
++#pragma once
++#include <algorithm>
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <limits>
++#include <stdexcept>
++#include <type_traits>
++#include <utility>
++#include <vector>
++
++namespace dxmt {
++// Publish a reference only after both allocations and the payload construction
++// have succeeded. A failed reserve must not leave a dangling stream entry.
++template <typename Ops, typename Payloads, typename Kind, typename T>
++void d9AppendBatchOp(Ops &ops, Payloads &payloads, Kind kind, T &&payload) {
++  static_assert(std::is_nothrow_move_constructible_v<typename Payloads::value_type>);
++  static_assert(std::is_nothrow_copy_constructible_v<typename Ops::value_type>);
++  if (payloads.size() >= std::numeric_limits<uint32_t>::max())
++    throw std::length_error("D3D9 batch index overflow");
++  auto grow = [](auto &v) {
++    if (v.size() == v.capacity()) {
++      const auto capacity = v.capacity();
++      const auto next = capacity <= v.max_size() / 2 ? capacity * 2 : v.max_size();
++      v.reserve(std::max(v.size() + 1, next));
++    }
++  };
++  grow(ops);
++  grow(payloads);
++  const auto index = static_cast<uint32_t>(payloads.size());
++  payloads.push_back(std::forward<T>(payload));
++  ops.push_back({kind, index});
++}
++
++// Swap all storage out before allocating/emitting the command closure. The
++// recorder's next batch cannot alias storage being consumed by the encoder.
++template <typename Op, typename Draw, typename Blit, typename Ref> struct D9SealedBatch {
++  std::vector<Op> ops;
++  std::vector<Draw> draws;
++  std::vector<Blit> blits;
++  std::vector<Ref> ref_ops;
++
++  D9SealedBatch(std::vector<Op> &o, std::vector<Draw> &d,
++                std::vector<Blit> &b, std::vector<Ref> &r) noexcept {
++    ops.swap(o);
++    draws.swap(d);
++    blits.swap(b);
++    ref_ops.swap(r);
++  }
++  D9SealedBatch(D9SealedBatch &&) noexcept = default;
++  D9SealedBatch(const D9SealedBatch &) = delete;
++
++  // Per-kind records are appended in order, so every index must equal the
++  // next cursor, not merely be within the vector. Reject duplicate references,
++  // unknown tags, missing payloads, and orphan payloads before emitting work.
++  bool valid() const noexcept {
++    size_t draw = 0, blit = 0, ref = 0;
++    for (const auto &op : ops) {
++      switch (op.kind) {
++      case Op::Draw: if (op.index != draw++ || op.index >= draws.size()) return false; break;
++      case Op::Blit: if (op.index != blit++ || op.index >= blits.size()) return false; break;
++      case Op::SetRef: if (op.index != ref++ || op.index >= ref_ops.size()) return false; break;
++      default: return false;
++      }
++    }
++    return draw == draws.size() && blit == blits.size() && ref == ref_ops.size();
++  }
++
++  std::array<uintptr_t, 8> storage() const noexcept {
++    return {reinterpret_cast<uintptr_t>(ops.data()), ops.size(),
++            reinterpret_cast<uintptr_t>(draws.data()), draws.size(),
++            reinterpret_cast<uintptr_t>(blits.data()), blits.size(),
++            reinterpret_cast<uintptr_t>(ref_ops.data()), ref_ops.size()};
++  }
++
++  uint64_t fingerprint() const noexcept {
++    uint64_t hash = 14695981039346656037ull;
++    auto mix = [&hash](uint64_t value) { hash = (hash ^ value) * 1099511628211ull; };
++    mix(ops.size()); mix(draws.size()); mix(blits.size()); mix(ref_ops.size());
++    for (const auto &op : ops) { mix(op.kind); mix(op.index); }
++    for (const auto &op : blits) {
++      mix(static_cast<uint8_t>(op.kind));
++      mix(reinterpret_cast<uintptr_t>(op.src_tex.ptr()));
++      mix(reinterpret_cast<uintptr_t>(op.dst_tex.ptr()));
++    }
++    return hash;
++  }
++};
++} // namespace dxmt
+diff --git a/src/d3d9/d3d9_device.cpp b/src/d3d9/d3d9_device.cpp
+index 9798d07..f4a2888 100644
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -1,4 +1,5 @@
+ #include "d3d9_device.hpp"
++#include "d3d9_batch_stream.hpp"
+ #include "d3d9_guest_alloc.hpp"
+ #include "d3d9_madeira_window.hpp"
+ 
+@@ -7966,10 +7967,7 @@ MTLD3D9Device::QueueBatchedDraw(BatchedDraw &&draw) {
+   // in a heavy draw scene, clustered such that effectively every draw
+   // rebuilt the snapshot under COW). wined3d CS shape.
+ 
+-  // Push to the arrival-order op stream FIRST so the index field
+-  // points at the slot we're about to occupy in m_pendingDraws.
+-  m_pendingOps.push_back({PendingOpRef::Draw, static_cast<uint32_t>(m_pendingDraws.size())});
+-  m_pendingDraws.push_back(std::move(draw));
++  d9AppendBatchOp(m_pendingOps, m_pendingDraws, PendingOpRef::Draw, std::move(draw));
+   // Optional experiment: submit a complete draw batch before a synchronous
+   // readback forces the whole frame through the encode worker. This uses the
+   // same ordered, nonblocking commit path as rename pressure. Disabled by
+@@ -8006,13 +8004,11 @@ MTLD3D9Device::QueueBatchedDraw(BatchedDraw &&draw) {
+ 
+ void
+ MTLD3D9Device::QueueBlitOp(PendingBlitOp &&op) {
+-  // Same arrival-order discipline as QueueBatchedDraw; record the
+-  // ref before pushing the payload so the index field stays consistent.
++  // Allocate both vectors before publishing the payload/reference pair.
+   // Blits ride the same chunk lambda as draws; arrival-order across
+   // kinds matters for sequencing a blit's GPU writes against the
+   // draws that read its destination.
+-  m_pendingOps.push_back({PendingOpRef::Blit, static_cast<uint32_t>(m_pendingBlits.size())});
+-  m_pendingBlits.push_back(std::move(op));
++  d9AppendBatchOp(m_pendingOps, m_pendingBlits, PendingOpRef::Blit, std::move(op));
+ }
+ 
+ Rc<dxmt::Texture>
+@@ -8049,8 +8045,7 @@ MTLD3D9Device::QueueRefOp(PendingRefOp::Slot slot, void *new_com) {
+   // (the ref-state setter) AddRefPrivate'd new_com exactly once before
+   // calling; that single ref is the lifetime guarantee until the chunk
+   // walker installs it into m_encodeSideRefs via ApplyRefOp_d9.
+-  m_pendingOps.push_back({PendingOpRef::SetRef, static_cast<uint32_t>(m_pendingRefOps.size())});
+-  m_pendingRefOps.push_back({slot, new_com});
++  d9AppendBatchOp(m_pendingOps, m_pendingRefOps, PendingOpRef::SetRef, PendingRefOp{slot, new_com});
+ }
+ 
+ // Encode-thread walker hook: install one SetRef op into m_encodeSideRefs.
+@@ -10873,9 +10868,37 @@ MTLD3D9Device::FlushDrawBatch() {
+   size_t prev_blits_size = m_pendingBlits.size();
+   size_t prev_refops_size = m_pendingRefOps.size();
+   auto *chunk = m_dxmtQueue->CurrentChunk();
+-  chunk->emitcc([this, ops = std::move(m_pendingOps), draws = std::move(m_pendingDraws),
+-                 blits = std::move(m_pendingBlits), ref_ops = std::move(m_pendingRefOps), chunk_seq,
+-                 chunk_coherent_id](ArgumentEncodingContext &ctx) mutable {
++  D9SealedBatch<PendingOpRef, BatchedDraw, PendingBlitOp, PendingRefOp> batch(
++      m_pendingOps, m_pendingDraws, m_pendingBlits, m_pendingRefOps);
++  static const bool batch_check = [] {
++    const auto specific = env::getEnvVar("MADEIRA_D3D9_BATCH_CHECK");
++    return specific.empty() ? d9EnvGateEnabled("MADEIRA_DIAG")
++                            : d9EnvGateEnabled("MADEIRA_D3D9_BATCH_CHECK");
++  }();
++  const uint64_t batch_hash = batch_check ? batch.fingerprint() : 0;
++  const bool batch_valid = batch.valid();
++  const auto batch_storage = batch.storage();
++  chunk->emitcc([this, batch = std::move(batch), batch_check_on = batch_check, batch_hash,
++                 batch_valid, batch_storage, chunk_seq, chunk_coherent_id](ArgumentEncodingContext &ctx) mutable {
++    auto &ops = batch.ops;
++    auto &draws = batch.draws;
++    auto &blits = batch.blits;
++    auto &ref_ops = batch.ref_ops;
++    const bool storage_ok = batch.storage() == batch_storage;
++    const bool encode_valid = storage_ok && batch.valid();
++    const uint64_t encode_hash = batch_check_on && storage_ok ? batch.fingerprint() : 0;
++    if (!batch_valid || !encode_valid ||
++        (batch_check_on && encode_hash != batch_hash)) {
++      Logger::err(str::format("[d9-batch-integrity] rejected seq=", chunk_seq,
++          " valid-at-publish=", batch_valid, " valid-at-encode=", encode_valid,
++          " ops=", ops.size(), " draws=", draws.size(), " blits=", blits.size(),
++          " refs=", ref_ops.size(), " storage-unchanged=", storage_ok,
++          " ops-address=", batch_storage[0], " blits-address=", batch_storage[4],
++          " checksum-enabled=", batch_check_on, " expected-hash=", batch_hash,
++          " actual-hash=", encode_hash));
++      m_dxmtQueue->MarkDeviceError();
++      return;
++    }
+     // Single chunk-level autorelease pool. Wine's encode worker has
+     // no outer NSAutoreleasePool; one pool here covers every autoreleased
+     // Metal temporary produced by
+@@ -10913,7 +10936,21 @@ MTLD3D9Device::FlushDrawBatch() {
+       }
+     };
+ 
+-    for (auto &ref : ops) {
++    uint32_t next_draw = 0, next_blit = 0, next_ref = 0;
++    for (const auto &entry : ops) {
++      // Do not carry a reference into the command stream across Resolve/Metal
++      // calls. Validate again at consumption in case a prior op damaged it.
++      const PendingOpRef ref = entry;
++      const bool ref_ok = (ref.kind == PendingOpRef::Draw && ref.index == next_draw++ && ref.index < draws.size()) ||
++          (ref.kind == PendingOpRef::Blit && ref.index == next_blit++ && ref.index < blits.size()) ||
++          (ref.kind == PendingOpRef::SetRef && ref.index == next_ref++ && ref.index < ref_ops.size());
++      if (!ref_ok) {
++        Logger::err(str::format("[d9-batch-integrity] stream changed during encode seq=", chunk_seq,
++            " kind=", unsigned(ref.kind), " index=", ref.index));
++        end_current_pass();
++        m_dxmtQueue->MarkDeviceError();
++        return;
++      }
+       if (ref.kind == PendingOpRef::SetRef) {
+         // Apply the ref-state mutation onto the persistent encode-side
+         // mirror BEFORE any subsequent Draw reads it. The walker is the
+@@ -11004,6 +11041,17 @@ MTLD3D9Device::FlushDrawBatch() {
+         prev_attachments.valid = true;
+       } else { // Blit
+         auto &op = blits[ref.index];
++        const bool needs_source = op.kind != PendingBlitOp::Kind::BufferToTexture &&
++                                  op.kind != PendingBlitOp::Kind::GenerateMipmaps;
++        if (!op.dst_tex || (needs_source && !op.src_tex) ||
++            static_cast<unsigned>(op.kind) > static_cast<unsigned>(PendingBlitOp::Kind::DepthResolve)) {
++          Logger::err(str::format("[d9-batch-integrity] invalid blit seq=", chunk_seq,
++              " index=", ref.index, " kind=", unsigned(op.kind),
++              " src=", op.src_tex.ptr(), " dst=", op.dst_tex.ptr()));
++          end_current_pass();
++          m_dxmtQueue->MarkDeviceError();
++          return;
++        }
+         switch (op.kind) {
+         case MTLD3D9Device::PendingBlitOp::Kind::Stretch:
+           // Stretch / Resolve paths open their own render-pass
+@@ -11053,6 +11101,11 @@ MTLD3D9Device::FlushDrawBatch() {
+       }
+     }
+     end_current_pass();
++    if (batch_check_on && batch.fingerprint() != batch_hash) {
++      Logger::err(str::format("[d9-batch-integrity] payload changed during encode seq=", chunk_seq,
++          " expected-hash=", batch_hash, " actual-hash=", batch.fingerprint()));
++      m_dxmtQueue->MarkDeviceError();
++    }
+     // No per-chunk signalEvent; Present chunk tails one that advances m_completionEvent.
+     // Per-chunk signals cause SYNCHRONIZE instead of SWAP in dxmt_context coalescing.
+   });

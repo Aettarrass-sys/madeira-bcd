@@ -68,6 +68,8 @@ jobs:
           git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-reset-cache-and-result.patch"
           git -C research/dxmt apply --check "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-native-batch-safety.patch"
           git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-native-batch-safety.patch"
+          git -C research/dxmt apply --check "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-batch-integrity.patch"
+          git -C research/dxmt apply "$GITHUB_WORKSPACE/.github/patches/dxmt-d9-batch-integrity.patch"
           git -C research/dxmt diff --check
 
       - name: Check PTDE config, input and D3D9 regressions
@@ -76,6 +78,7 @@ jobs:
           python3 build/host-tests/check-nav-keys.py
           python3 build/host-tests/check-d9-upload-commit.py
           python3 build/host-tests/check-scene-batching.py
+          CXX=clang++ python3 build/host-tests/check-d9-batch-stream.py
           CXX=clang++ bash build/dxmt-tests/build-bcn-host-test.sh
 
       - name: Require the matching private converter package
@@ -1255,6 +1258,8 @@ jobs:
           grep -a -q '\[d9-pass-buffer-access\]' "$app/i386-windows/d3d9-emulated.dll"
           grep -a -q '\[d3d9-reset-cache\]' "$app/i386-windows/d3d9.dll"
           cmp "$app/i386-windows/d3d9.dll" "$app/i386-windows/d3d9shim.dll"
+          grep -a -q '\[d9-batch-integrity\]' "$app/Madeira"
+          xcrun nm -n "$app/Madeira" > build-out/madeira-native-symbols.log
           echo "::notice::AppIcon, D3D9 timing, and per-encoder buffer access dedup are in the archived app"
 
       # A device run reached DXMT and died there:
