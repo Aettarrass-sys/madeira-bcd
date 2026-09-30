@@ -1,5 +1,31 @@
 # Native D3D9 batch integrity and recording synchronization
 
+## Follow-up: timing bounds and scheduling
+
+The 0.1.40 playthrough had no batch-integrity rejection, and the user quit
+manually. Investigation of impossible timing counters found a separate bug
+in our `dxmt-d9-encode-detail.patch`: its six-stage loop also indexed the
+five-entry flush totals and input arrays. `dxmt-d9-timing-bounds.patch` splits
+those loops. The production accumulation is tested under ASan/UBSan for 1,000
+windows, and the original implementation must fail the same test.
+
+Two upstream BCD scheduling changes are ported together:
+
+- `d25478311b`: on iOS, preserve pthread QoS below the Windows realtime band,
+  with `env.MADEIRA_WIN_THREAD_PRIORITY=1` restoring the original wineserver
+  priority mapping. The existing realtime policy remains active.
+- `5b7448ad9f`: create the guest main pthread with a USER_INTERACTIVE QoS
+  attribute instead of `sched_priority=20`, which can prevent later QoS changes
+  on Darwin. The existing ECO path can therefore change its class.
+
+Priority diagnostics are bounded and follow `MADEIRA_DIAG`. Main-thread QoS is
+reported once with diagnostics enabled, or on an actual QoS API failure.
+Host tests exercise the inserted policy for default/rollback and iOS/non-iOS
+builds; they do not simulate Darwin's scheduling decisions. iPhone tests must
+establish PTDE's benefit. This build retains native device locking, early-commit
+configuration and optional diagnostic behavior. It does not change the default
+sync engine: `inproc-sync=1` remains a separate A/B test against fastsync.
+
 ## Follow-up: 0.1.39 hang
 
 The device log rejected batch 61994 with 84 operation references and 85

@@ -1,0 +1,13 @@
+--- a/src/d3d9/d3d9_device.cpp
++++ b/src/d3d9/d3d9_device.cpp
+@@ -4929,6 +4929,10 @@
+     for (size_t i = 0; i < stage_us.size(); ++i) {
+       m_targetStageUs[i] += stage_us[i];
+       m_targetStageMaxUs[i] = std::max(m_targetStageMaxUs[i], stage_us[i]);
++    }
++    // Stage timings have six entries; encoder buckets have only five.
++    // Never index the flush arrays using stage_us.size().
++    for (size_t i = 0; i < m_targetFlushNs.size(); ++i) {
+       m_targetFlushNs[i] += timing.flush.nanoseconds[i];
+       m_targetFlushCounts[i] += timing.flush.counts[i];
+     }

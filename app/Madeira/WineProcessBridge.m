@@ -643,7 +643,16 @@ static void *wine_process_thread(void *arg) {
          * USER_INTERACTIVE so it schedules on P-cores with minimal kernel
          * timer coalescing (same rationale as start_thread in
          * thread_ios.c — default QoS costs tens of ms of sleep leeway). */
-        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+        {
+            int qrc = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+            const char *diag = getenv("MADEIRA_DIAG");
+            if (qrc || (diag && diag[0] == '1')) {
+                qos_class_t actual = QOS_CLASS_UNSPECIFIED;
+                int relative = 0;
+                pthread_get_qos_class_np(pthread_self(), &actual, &relative);
+                dprintf(STDERR_FILENO, "[main-qos] guest main set rc=%d class=0x%x\n", qrc, (unsigned)actual);
+            }
+        }
         LOG("Wine process thread started");
 
         /* ml588: seeding itself now happens in wineserver_start(), BEFORE the
@@ -1949,11 +1958,14 @@ int wine_process_start(const char *prefix_path) {
     // Inject wineserver side — the event loop will pick this up
     wineserver_inject_client_fd(pair[0]);
 
-    // Lower priority so Wine init doesn't starve the main thread
+    // A fixed sched_priority prevents Darwin's later QoS changes (EPERM).
+    // Use a QoS attribute so the guest main thread and ECO can change class.
+    // Adapted from bahacan16/madeira-bcd 5b7448ad9f.
     pthread_attr_t attr;
     pthread_attr_init(&attr);
-    struct sched_param sched = { .sched_priority = 20 };  // lower than default (31)
-    pthread_attr_setschedparam(&attr, &sched);
+    int qos_ret = pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INTERACTIVE, 0);
+    if (qos_ret)
+        LOG("Guest main thread QoS attribute failed: %d", qos_ret);
 
     int ret = pthread_create(&g_wine_thread, &attr, wine_process_thread, NULL);
     pthread_attr_destroy(&attr);
