@@ -525,9 +525,9 @@ jobs:
           test "$MINGW_OK" = 1
           test -x toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin/aarch64-w64-mingw32-clang++
 
-      # PTDE uses d3d9=emulated, which loads this PE frontend. Run this
-      # before the unrelated FEX/LLVM builds so a cross-build error fails fast.
-      - name: Rebuild emulated i386 D3D9 with readback timing
+      # Rebuild both i386 frontends from the patched DXMT checkout. Native
+      # D3D9 loads the shim as d3d9.dll; emulated loads d3d9-emulated.dll.
+      - name: Rebuild i386 D3D9 shim and emulated frontend
         shell: bash
         run: bash tools/build-dxmt-i386-d3d9.sh
 
@@ -1251,6 +1251,8 @@ jobs:
           grep -a -q '\[d9-target-detail\]' "$app/i386-windows/d3d9-emulated.dll"
           grep -a -q '\[d9-target-fine\]' "$app/i386-windows/d3d9-emulated.dll"
           grep -a -q '\[d9-pass-buffer-access\]' "$app/i386-windows/d3d9-emulated.dll"
+          grep -a -q '\[d3d9-reset-cache\]' "$app/i386-windows/d3d9.dll"
+          cmp "$app/i386-windows/d3d9.dll" "$app/i386-windows/d3d9shim.dll"
           echo "::notice::AppIcon, D3D9 timing, and per-encoder buffer access dedup are in the archived app"
 
       # A device run reached DXMT and died there:

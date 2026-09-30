@@ -142,3 +142,48 @@ with open(sys.argv[1], 'rb') as binary:
 PY
 mv "$TMP" "$DEST"
 echo "::notice::rebuilt i386 d3d9-emulated.dll with readback timing: $(wc -c < "$DEST") bytes"
+
+# Native D3D9 uses the i386 shim, not d3d9-emulated.dll. Keep the two PE
+# frontends from the same patched DXMT checkout. The native Reset fix lives
+# in d3d9shim_object.c, so shipping the tracked shim would omit it entirely.
+SHIM_SOURCE="$(python3 - "$DB" <<'PY'
+import json, subprocess, sys
+targets = json.loads(subprocess.check_output(['meson', 'introspect', '--targets', sys.argv[1]]))
+matches = [p for t in targets if t['name'] == 'd3d9shim' and t['type'] == 'shared library'
+           for p in t['filename'] if p.endswith('.dll')]
+if len(matches) != 1:
+    raise SystemExit(f'expected one Meson D3D9 shim target, found {matches!r}')
+print(matches[0])
+PY
+)"
+if ! SDKROOT="$(xcrun --sdk macosx --show-sdk-path)" \
+    meson compile -C "$DB" d3d9shim \
+    > "$OUT/dxmt-i386-shim-build.log" 2>&1; then
+  tail -100 "$OUT/dxmt-i386-shim-build.log"
+  echo "::error::DXMT i386 native D3D9 shim build failed"
+  exit 1
+fi
+test -s "$SHIM_SOURCE"
+SHIM_TMP="$OUT/d3d9shim.rebuilt.dll"
+"$TC/i686-w64-mingw32-strip" -o "$SHIM_TMP" "$SHIM_SOURCE"
+grep -a -q '\[d3d9-reset-cache\]' "$SHIM_TMP" || {
+  echo "::error::native D3D9 Reset cache fix missing from rebuilt shim"
+  exit 1
+}
+"$TC/llvm-readobj" --coff-exports "$SHIM_TMP" > "$OUT/dxmt-i386-shim-exports.txt"
+grep -q 'Name: Direct3DCreate9' "$OUT/dxmt-i386-shim-exports.txt" || {
+  echo "::error::native D3D9 shim export missing"
+  exit 1
+}
+python3 - "$SHIM_TMP" <<'PY'
+import mmap, struct, sys
+with open(sys.argv[1], 'rb') as binary:
+    with mmap.mmap(binary.fileno(), 0, access=mmap.ACCESS_READ) as data:
+        pe = struct.unpack_from('<I', data, 0x3c)[0]
+        if data[:2] != b'MZ' or data[pe:pe + 4] != b'PE\0\0' \
+                or struct.unpack_from('<H', data, pe + 4)[0] != 0x14c:
+            raise SystemExit('rebuilt native D3D9 shim is not i386 PE')
+PY
+cp "$SHIM_TMP" "$R/app/Madeira/i386-windows/d3d9.dll"
+cp "$SHIM_TMP" "$R/app/Madeira/i386-windows/d3d9shim.dll"
+echo "::notice::rebuilt i386 native D3D9 shim: $(wc -c < "$SHIM_TMP") bytes"
