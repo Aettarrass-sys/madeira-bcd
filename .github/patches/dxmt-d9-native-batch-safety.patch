@@ -1,0 +1,80 @@
+diff --git a/src/d3d9/unix/d3d9_native_glue.cpp b/src/d3d9/unix/d3d9_native_glue.cpp
+index 76451e8..37438ac 100644
+--- a/src/d3d9/unix/d3d9_native_glue.cpp
++++ b/src/d3d9/unix/d3d9_native_glue.cpp
+@@ -1336,16 +1336,12 @@ d3d9_native_create_interface(d3d9_native_handle *iface, uint32_t sdk_version, ui
+ 
+ /* CreateDevice / CreateDeviceEx owe two things a forwarding body cannot:
+  *
+- *  1. D3DCREATE_MULTITHREADED is stripped.  8.2(d) moves that lock into the
+- *     shim -- a recursive spinlock keyed by GetCurrentThreadId, taken on the
+- *     guest's own thread -- and says the native device is constructed
+- *     `is_protected=false`.  MTLD3D9Device derives is_protected from the
+- *     BehaviorFlags it is handed (d3d9_device.cpp:533), so clearing the bit
+- *     HERE is how that is expressed without reaching into the device.
+- *     Leaving it set would take a second, redundant recursive lock at every
+- *     one of the 320 entry points, on the hot path, for a race the shim has
+- *     already serialised.  What the application passed is remembered so
+- *     GetCreationParameters still reports it.
++ *  1. Exactly one device lock must protect the native D3D9 pending-op vectors.
++ *     When the guest requested D3DCREATE_MULTITHREADED its shim lock covers
++ *     calls, so clear the bit for DXMT. Otherwise give DXMT its own device
++ *     lock: some games issue resource calls from workers even without the
++ *     flag, and concurrent vector mutation corrupts PendingBlitOp references.
++ *     The original flags are remembered for GetCreationParameters.
+  *  2. The window-size cache is seeded.  The shim pushes the real client size
+  *     on slot 322 before it calls, but a device created with a zero extent
+  *     and a non-NULL hDeviceWindow makes CanonicalisePresentParams ask
+@@ -1391,7 +1387,7 @@ d3d9_native_D3D9Ex_CreateDevice(d3d9_native_handle self, UINT adapter_idx, D3DDE
+ 
+     IDirect3DDevice9 *created = nullptr;
+     HRESULT hr = _self->CreateDevice(adapter_idx, device_type, focus_window,
+-                                     flags & ~(DWORD)D3DCREATE_MULTITHREADED,
++                                     (flags ^ (DWORD)D3DCREATE_MULTITHREADED),
+                                      parameters, &created);
+     if (SUCCEEDED(hr) && created)
+       remember_behavior_flags(
+@@ -1425,7 +1421,7 @@ d3d9_native_D3D9Ex_CreateDeviceEx(d3d9_native_handle self, UINT adapter_idx, D3D
+     /* The SDK declares pFullscreenDisplayMode non-const while the runtime
+      * only reads it; d3d9_api.py describes it as the input it is. */
+     HRESULT hr = _self->CreateDeviceEx(adapter_idx, device_type, focus_window,
+-                                       flags & ~(DWORD)D3DCREATE_MULTITHREADED, parameters,
++                                       (flags ^ (DWORD)D3DCREATE_MULTITHREADED), parameters,
+                                        const_cast<D3DDISPLAYMODEEX *>(mode), &created);
+     if (SUCCEEDED(hr) && created)
+       remember_behavior_flags(static_cast<void *>(created), flags);
+diff --git a/src/util/rc/util_rc_ptr.hpp b/src/util/rc/util_rc_ptr.hpp
+index a43309f..33d92bf 100644
+--- a/src/util/rc/util_rc_ptr.hpp
++++ b/src/util/rc/util_rc_ptr.hpp
+@@ -41,11 +41,11 @@ public:
+     this->incRef();
+   }
+ 
+-  Rc(Rc &&other) : m_object(other.m_object) {
++  Rc(Rc &&other) noexcept : m_object(other.m_object) {
+     other.m_object = nullptr;
+   }
+ 
+-  template <typename Tx> Rc(Rc<Tx> &&other) : m_object(other.m_object) {
++  template <typename Tx> Rc(Rc<Tx> &&other) noexcept : m_object(other.m_object) {
+     other.m_object = nullptr;
+   }
+ 
+@@ -69,14 +69,14 @@ public:
+     return *this;
+   }
+ 
+-  Rc &operator=(Rc &&other) {
++  Rc &operator=(Rc &&other) noexcept {
+     this->decRef();
+     this->m_object = other.m_object;
+     other.m_object = nullptr;
+     return *this;
+   }
+ 
+-  template <typename Tx> Rc &operator=(Rc<Tx> &&other) {
++  template <typename Tx> Rc &operator=(Rc<Tx> &&other) noexcept {
+     this->decRef();
+     this->m_object = other.m_object;
+     other.m_object = nullptr;

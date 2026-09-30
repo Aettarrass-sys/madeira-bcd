@@ -892,7 +892,7 @@ struct ContentView: View {
             return (max(640, Int(b.width)), max(480, Int(b.height)))
         }
         let parts = value.split(separator: "x")
-        if parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]), w >= 640, h >= 480 {
+        if parts.count == 2, let w = Int(parts[0]), let h = Int(parts[1]), w >= 640, h >= 360 {
             return (w, h)
         }
         return (960, 540)

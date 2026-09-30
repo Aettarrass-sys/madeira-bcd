@@ -1490,7 +1490,16 @@ void winios_compositor_relayout(void) {
 
 /* main thread only */
 static void winios_ensure_compositor(void) {
-    if (g_compositor_view) return;
+    if (g_compositor_view) {
+        /* The SwiftUI Metal placeholder can attach its window-level host
+         * after Wine has created the desktop. That late addSubview covers
+         * the GDI compositor even though surfaces keep presenting. Restore
+         * desktop stacking on the next frame, regardless of MADEIRA_DIAG. */
+        UIWindow *parent = (UIWindow *)g_compositor_view.superview;
+        if (parent && parent.subviews.lastObject != g_compositor_view)
+            [parent bringSubviewToFront:g_compositor_view];
+        return;
+    }
     /* desktop mode only — games render via DXMT's Metal layer and the
      * compositor backdrop would cover it (2026-07-06 Thumper regression) */
     const char *dm = getenv("MADEIRA_DESKTOP");
@@ -2098,8 +2107,9 @@ int winios_surface_present(HWND hwnd, int dx, int dy, int dw, int dh,
         fflush(stderr);
     }
 
-    if (mycnt <= 16 || (mycnt % 200) == 0 ||
-        (sw >= 400 && sh >= 400 && mycnt <= 2000)) {
+    if (winios_diag_on() &&
+        (mycnt <= 16 || (mycnt % 200) == 0 ||
+         (sw >= 400 && sh >= 400 && mycnt <= 2000))) {
         /* ml504: bits pointer + content signature per present.
          *
          * ml503 showed ~200k pixels changing across the WHOLE window while

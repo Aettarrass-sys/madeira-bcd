@@ -921,6 +921,16 @@ static void *wine_process_thread(void *arg) {
                     LOG("madeira.cfg env: %{public}s=%{public}s", k.UTF8String, v.UTF8String);
                     fprintf(stderr, "[madeira-env] ml1062 %s=%s\n", k.UTF8String, v.UTF8String);
                 }
+                /* A saved per-game resolution has priority over global cfg
+                 * env lines. Apply the pair together after cfg export so the
+                 * desktop argument and the guest display seed cannot disagree. */
+                const char *game_w = getenv("MADEIRA_GAME_SCREEN_W");
+                const char *game_h = getenv("MADEIRA_GAME_SCREEN_H");
+                if (game_w && game_h) {
+                    setenv("MADEIRA_SCREEN_W", game_w, 1);
+                    setenv("MADEIRA_SCREEN_H", game_h, 1);
+                    fprintf(stderr, "[display] game launch resolution %sx%s\n", game_w, game_h);
+                }
             }
         }
 

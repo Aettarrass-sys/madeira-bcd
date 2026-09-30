@@ -37,6 +37,8 @@ struct LaunchRequest {
     let args: String?
     /// Wine virtual desktop size, or nil to run the program directly.
     let desktop: (w: Int, h: Int)?
+    /// Saved guest display size, also used for direct game launches.
+    var screen: (w: Int, h: Int)? = nil
     /// Tell FEX to expose AVX/AVX2 (tools/patch-fex-ios-avx.py). Off unless
     /// the game's settings turn it on.
     var avx = false
@@ -56,12 +58,22 @@ struct LaunchRequest {
         ExperimentalSettings.exportToEnvironment()
         setenv("MADEIRA_EXE", exe, 1)
         if let a = args, !a.isEmpty { setenv("MADEIRA_ARGS", a, 1) } else { unsetenv("MADEIRA_ARGS") }
-        if let d = desktop {
+        if desktop != nil {
             setenv("MADEIRA_DESKTOP", "1", 1)
-            setenv("MADEIRA_SCREEN_W", String(d.w), 1)
-            setenv("MADEIRA_SCREEN_H", String(d.h), 1)
         } else {
             unsetenv("MADEIRA_DESKTOP")
+        }
+        if let size = screen ?? desktop {
+            setenv("MADEIRA_SCREEN_W", String(size.w), 1)
+            setenv("MADEIRA_SCREEN_H", String(size.h), 1)
+            // Reapply after madeira.cfg environment exports in WineProcessBridge.
+            setenv("MADEIRA_GAME_SCREEN_W", String(size.w), 1)
+            setenv("MADEIRA_GAME_SCREEN_H", String(size.h), 1)
+        } else {
+            unsetenv("MADEIRA_SCREEN_W")
+            unsetenv("MADEIRA_SCREEN_H")
+            unsetenv("MADEIRA_GAME_SCREEN_W")
+            unsetenv("MADEIRA_GAME_SCREEN_H")
         }
         if avx { setenv("MADEIRA_FEX_AVX", "1", 1) } else { unsetenv("MADEIRA_FEX_AVX") }
         if wineVCRT { setenv("MADEIRA_WINE_VCRT", "1", 1) } else { unsetenv("MADEIRA_WINE_VCRT") }
@@ -249,6 +261,7 @@ enum LibraryPrefs {
     private static let vcrtKey = "madeira.library.wineVCRT"
     private static let nvidiaKey = "madeira.library.nvidia"
     private static let safeSyncKey = "madeira.library.safeSync"
+    private static let resolutionKey = "madeira.library.resolution"
 
     private static func dict<T>(_ key: String) -> [String: T] {
         (UserDefaults.standard.dictionary(forKey: key) as? [String: T]) ?? [:]
@@ -283,6 +296,13 @@ enum LibraryPrefs {
 
     static func safeSync(_ windowsPath: String) -> Bool { (dict(safeSyncKey) as [String: Bool])[windowsPath] ?? false }
     static func setSafeSync(_ on: Bool, for windowsPath: String) { store(on ? true : nil, safeSyncKey, windowsPath) }
+
+    static func resolution(_ windowsPath: String) -> String {
+        (dict(resolutionKey) as [String: String])[windowsPath] ?? "default"
+    }
+    static func setResolution(_ value: String, for windowsPath: String) {
+        store(value == "default" ? nil : value, resolutionKey, windowsPath)
+    }
 }
 
 /// Reads the PE header's Machine field. Two small reads per file, off the main
@@ -709,9 +729,11 @@ struct HomeView: View {
         if let note = FixedBaseImage.prepare(exe.url) { LogStore.shared.log(note) }
         let saved = GameArguments.get(exe.windowsPath)
         let args = saved.isEmpty ? GameArguments.suggestion(for: exe) : saved
+        let resolution = LibraryPrefs.resolution(exe.windowsPath)
+        let chosenSize = resolution == "default" ? nil : ContentView.desktopSize(resolution)
         var request: LaunchRequest
         if LibraryPrefs.inDesktop(exe.windowsPath) {
-            let size = ContentView.desktopSize(desktopRes)
+            let size = chosenSize ?? ContentView.desktopSize(desktopRes)
             let program = "\"\(exe.windowsPath)\"" + (args.isEmpty ? "" : " " + args)
             request = LaunchRequest(title: game.title, exe: "explorer.exe",
                                     args: "/desktop=shell,\(size.0)x\(size.1) " + program,
@@ -719,6 +741,7 @@ struct HomeView: View {
         } else {
             request = LaunchRequest(title: game.title, exe: exe.windowsPath, args: args, desktop: nil)
         }
+        if let size = chosenSize { request.screen = (w: size.0, h: size.1) }
         request.avx = LibraryPrefs.avx(exe.windowsPath)
         request.wineVCRT = LibraryPrefs.wineVCRT(exe.windowsPath)
         request.nvidia = LibraryPrefs.nvidia(exe.windowsPath)
@@ -909,6 +932,7 @@ struct GameSettingsSheet: View {
     @State private var wineVCRT: Bool
     @State private var nvidia: Bool
     @State private var safeSync: Bool
+    @State private var resolution: String
     @State private var photo: PhotosPickerItem?
     @State private var tick = 0
 
@@ -925,6 +949,7 @@ struct GameSettingsSheet: View {
         _wineVCRT = State(initialValue: LibraryPrefs.wineVCRT(exe.windowsPath))
         _nvidia = State(initialValue: LibraryPrefs.nvidia(exe.windowsPath))
         _safeSync = State(initialValue: LibraryPrefs.safeSync(exe.windowsPath))
+        _resolution = State(initialValue: LibraryPrefs.resolution(exe.windowsPath))
     }
 
     /// What the exe will get: the typed arguments, else the suggestion.
@@ -1016,6 +1041,12 @@ struct GameSettingsSheet: View {
 
                 Section {
                     Toggle("Run inside the Wine desktop", isOn: $inDesktop)
+                    Picker("Launch resolution", selection: $resolution) {
+                        Text("Default").tag("default")
+                        ForEach(["640x360", "800x450"] + ContentView.desktopResolutions.filter { $0 != "native" }, id: \.self) { size in
+                            Text(size).tag(size)
+                        }
+                    }
                     Toggle("AVX / AVX2", isOn: $avx)
                     Toggle("Wine's C++ runtime", isOn: $wineVCRT)
                     Toggle("Report an NVIDIA GPU", isOn: $nvidia)
@@ -1031,7 +1062,8 @@ struct GameSettingsSheet: View {
                          + "NVAPI, for games that stop with \"no graphics card\" or \"failed to get GPU driver "
                          + "info\" (Ghost of Tsushima). Safe thread sync turns off Madeira's fast path for "
                          + "Windows events and waits: slower, for a game whose threads crash on memory another "
-                         + "thread just freed.")
+                         + "thread just freed. Launch resolution sets the guest display size for direct launches "
+                         + "and the Wine desktop; DSfix render resolution remains a separate setting.")
                 }
 
                 Section {
@@ -1082,6 +1114,7 @@ struct GameSettingsSheet: View {
                 wineVCRT = LibraryPrefs.wineVCRT(newPath)
                 nvidia = LibraryPrefs.nvidia(newPath)
                 safeSync = LibraryPrefs.safeSync(newPath)
+                resolution = LibraryPrefs.resolution(newPath)
             }
             .onChange(of: photo) { _, item in
                 guard let item else { return }
@@ -1107,6 +1140,7 @@ struct GameSettingsSheet: View {
         LibraryPrefs.setWineVCRT(wineVCRT, for: exePath)
         LibraryPrefs.setNvidia(nvidia, for: exePath)
         LibraryPrefs.setSafeSync(safeSync, for: exePath)
+        LibraryPrefs.setResolution(resolution, for: exePath)
     }
 }
 
